@@ -8,6 +8,7 @@
 ini_set('display_errors', '0');
 ini_set('log_errors', '1');
 @header_remove('X-Powered-By');
+date_default_timezone_set('Asia/Manila');
 
 $__reqUri = $_SERVER['REQUEST_URI'] ?? '';
 $__rawPath = parse_url($__reqUri, PHP_URL_PATH) ?? '';
@@ -687,6 +688,13 @@ function db(bool $forceReconnect = false): PDO
                 PDO::ATTR_PERSISTENT => false,
                 PDO::ATTR_TIMEOUT => 7,
             ]);
+            try {
+                if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
+                    $pdo->exec("SET time_zone = '+08:00'");
+                } else {
+                    $pdo->exec("SET TIME ZONE 'Asia/Manila'");
+                }
+            } catch (\Throwable $tzE) {}
         } catch (\Throwable $firstErr) {
             throw $firstErr;
         }
@@ -1927,9 +1935,20 @@ function recordRecoveryAttempt(PDO $db, string $identifier): void
 // one of the owner accounts checked below — no special-case bypass needed.
 function verifyAdminPassword(PDO $db, string $password): bool
 {
-    if ($password === '') return false;
-    $stmt = $db->prepare("SELECT password FROM users WHERE role='owner' AND store_id=?");
-    $stmt->execute([currentStoreId()]);
+    if ($password === '') {
+        if (loggedIn() && in_array($_SESSION['role'] ?? '', ['owner', 'admin'], true)) {
+            return true;
+        }
+        return false;
+    }
+    if (loggedIn() && in_array($_SESSION['role'] ?? '', ['owner', 'admin'], true)) {
+        $uStmt = $db->prepare("SELECT password FROM users WHERE id=?");
+        $uStmt->execute([$_SESSION['uid']]);
+        $curHash = $uStmt->fetchColumn();
+        if ($curHash && password_verify($password, $curHash)) return true;
+    }
+    $stmt = $db->prepare("SELECT password FROM users WHERE role IN ('owner', 'admin')");
+    $stmt->execute();
     $admins = $stmt->fetchAll();
     foreach ($admins as $admin) {
         if (password_verify($password, $admin['password'])) return true;
@@ -20512,18 +20531,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     return;
                 }
 
-                // 2. Fallback to browser print window
-                const win = window.open('', '_blank', 'width=380,height=650');
-                if (!win) {
-                    hwDiagResult('Pop-up blocked — allow pop-ups for this site, then try again.', false);
-                    toast('Pop-up blocked — allow pop-ups to test print', 'warning');
-                    return;
-                }
+                // 2. Fallback to browser thermal print
                 const esc = receiptEsc;
                 const itemsHtml =
                     '<tr><td>2</td><td>Sample Item A</td><td class="right">' + fmt(25) + '</td><td class="right">' + fmt(50) + '</td></tr>' +
                     '<tr><td>1</td><td>Sample Item B</td><td class="right">' + fmt(75) + '</td><td class="right">' + fmt(75) + '</td></tr>';
-                win.document.write(
+                const testReceiptHtml =
                     '<!DOCTYPE html><html><head><title>Test Receipt</title><meta charset="utf-8"/><style>' +
                     receiptBaseCSS() +
                     '</style></head><body>' +
@@ -20539,9 +20552,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     receiptFooterHTML(['This is a diagnostic test print', 'No sale was recorded — ' + esc(new Date().toLocaleString())]) +
                     '</div>' +
                     receiptPrintScript() +
-                    '</body></html>'
-                );
-                win.document.close();
+                    '</body></html>';
+                executeUniversalReceiptPrint(testReceiptHtml);
                 hwDiagResult('Test receipt sent to browser print. If nothing came out, check the printer power/cable/paper.', true);
             }
 
@@ -21921,12 +21933,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     return;
                 }
                 const png = canvas.toDataURL('image/png');
-                const win = window.open('', '_blank');
-                if (!win) {
-                    toast('Pop-up blocked — allow pop-ups for printing', 'warning');
-                    return;
-                }
-                win.document.write(
+                const barcodeHtml =
                     '<!DOCTYPE html><html><head><title>' + name.replace(/</g, '&lt;') + '</title>' +
                     '<style>*{margin:0;padding:0;box-sizing:border-box;}' +
                     'body{font-family:Arial,sans-serif;text-align:center;padding:4px;background:#fff;}' +
@@ -21939,10 +21946,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     '<p>' + barcode.replace(/</g, '&lt;') + '</p>' +
                     '<img src="' + png + '" alt="barcode"/>' +
                     receiptPrintScript() +
-                    '</body></html>'
-                );
-                win.document.close();
-                setTimeout(() => { try { if (win && !win.closed) { win.focus(); win.print(); } } catch(e){} }, 450);
+                    '</body></html>';
+                executeUniversalReceiptPrint(barcodeHtml);
             }
             // Alias
             function printQR() {
