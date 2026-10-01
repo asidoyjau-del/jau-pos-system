@@ -4,6 +4,8 @@
 
 # Render persistent-disk content and local uploads
 uploads/products/*
+!uploads/products/.htaccess
+!uploads/products/index.html
 uploads/shop/*
 !uploads/shop/.htaccess
 !uploads/shop/index.html

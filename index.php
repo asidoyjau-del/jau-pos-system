@@ -2519,23 +2519,41 @@ if (isset($_GET['api'])) {
                     if ($uStmt) $users = $uStmt->fetchAll();
                 } catch (\Throwable $e) {}
 
-                // Store details
-                $storeInfo = null;
-                if ($filterStoreId > 0) {
-                    try {
-                        $stStmt = $db->prepare("SELECT id, name, currency FROM stores WHERE id = ?");
-                        $stStmt->execute([$filterStoreId]);
-                        $storeInfo = $stStmt->fetch();
-                    } catch (\Throwable $e) {}
-                }
+                // Recent sales transactions (allows local POS to mirror online Sales History)
+                $recentTransactions = [];
+                try {
+                    $isPg = ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'pgsql');
+                    $intervalExpr = $isPg ? "NOW() - INTERVAL '30 days'" : "DATE_SUB(NOW(), INTERVAL 30 DAY)";
+                    $txSql = "SELECT * FROM transactions WHERE created_at >= {$intervalExpr}";
+                    if ($filterStoreId > 0) {
+                        $txSql .= " AND store_id = ? ORDER BY id DESC LIMIT 200";
+                        $txStmt = $db->prepare($txSql);
+                        $txStmt->execute([$filterStoreId]);
+                    } else {
+                        $txSql .= " ORDER BY id DESC LIMIT 200";
+                        $txStmt = $db->query($txSql);
+                    }
+                    if ($txStmt) {
+                        $rawTxs = $txStmt->fetchAll(PDO::FETCH_ASSOC);
+                        if (!empty($rawTxs)) {
+                            $itemStmt = $db->prepare("SELECT * FROM transaction_items WHERE transaction_id = ?");
+                            foreach ($rawTxs as $rtx) {
+                                $itemStmt->execute([$rtx['id']]);
+                                $rtx['items'] = $itemStmt->fetchAll(PDO::FETCH_ASSOC);
+                                $recentTransactions[] = $rtx;
+                            }
+                        }
+                    }
+                } catch (\Throwable $e) {}
 
                 json(true, [
-                    'store_id'   => $filterStoreId,
-                    'store'      => $storeInfo,
-                    'categories' => $categories,
-                    'products'   => $products,
-                    'batches'    => $batches,
-                    'users'      => $users
+                    'store_id'     => $filterStoreId,
+                    'store'        => $storeInfo,
+                    'categories'   => $categories,
+                    'products'     => $products,
+                    'batches'      => $batches,
+                    'users'        => $users,
+                    'transactions' => $recentTransactions
                 ]);
             }
 
@@ -14927,7 +14945,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             const SHOW_SHIFT_LOCK_ON_LOAD = <?= $showShiftLockOnLoad ? 'true' : 'false' ?>;
 
             // ── API ──
-            const API_TIMEOUT_MS = 20000; // generous for slow/free hosting, but finite — requests never hang forever
+            const API_TIMEOUT_MS = 45000; // generous for slow/free hosting (waking Render containers), finite — requests never hang forever
 
             // A raw network failure (offline / DNS / connection reset) never reached the
             // server at all, so it's safe to silently retry once — nothing could have
