@@ -298,6 +298,41 @@ function csrfValid(?string $submitted): bool
     return is_string($submitted) && $submitted !== '' && hash_equals(CSRF_TOKEN, $submitted);
 }
 
+// ── FINANCIAL PRECISION HELPERS (BCMath with high-precision arithmetic) ──
+function finAdd(string|float|int $a, string|float|int $b, int $scale = 2): float {
+    if (function_exists('bcadd')) {
+        return (float)bcadd(number_format((float)$a, 4, '.', ''), number_format((float)$b, 4, '.', ''), $scale);
+    }
+    return round((float)$a + (float)$b, $scale);
+}
+
+function finSub(string|float|int $a, string|float|int $b, int $scale = 2): float {
+    if (function_exists('bcsub')) {
+        return (float)bcsub(number_format((float)$a, 4, '.', ''), number_format((float)$b, 4, '.', ''), $scale);
+    }
+    return round((float)$a - (float)$b, $scale);
+}
+
+function finMul(string|float|int $a, string|float|int $b, int $scale = 2): float {
+    if (function_exists('bcmul')) {
+        return (float)bcmul(number_format((float)$a, 4, '.', ''), number_format((float)$b, 4, '.', ''), $scale);
+    }
+    return round((float)$a * (float)$b, $scale);
+}
+
+function finDiv(string|float|int $a, string|float|int $b, int $scale = 2): float {
+    $bf = (float)$b;
+    if ($bf == 0.0) return 0.0;
+    if (function_exists('bcdiv')) {
+        return (float)bcdiv(number_format((float)$a, 4, '.', ''), number_format($bf, 4, '.', ''), $scale);
+    }
+    return round((float)$a / $bf, $scale);
+}
+
+function finRound(string|float|int $val, int $scale = 2): float {
+    return round((float)$val, $scale);
+}
+
 // ── PRODUCT PHOTO FILE STORAGE ──
 // New uploads are written as real files under /uploads/products/ instead of
 // base64 text in the DB — this is what makes get_product_image fast (see that
@@ -1341,6 +1376,21 @@ function installDB(): void
         value TEXT NOT NULL
     )");
 
+    $db->exec("CREATE TABLE IF NOT EXISTS forecast_cache (
+        id SERIAL PRIMARY KEY,
+        cache_key VARCHAR(128) NOT NULL UNIQUE,
+        store_id INT NOT NULL DEFAULT 1,
+        product_id INT NULL,
+        horizon_days INT NOT NULL DEFAULT 7,
+        source VARCHAR(32) NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+        expires_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_fc_lookup ON forecast_cache (store_id, product_id, horizon_days);
+    CREATE INDEX IF NOT EXISTS idx_fc_expires ON forecast_cache (expires_at);");
+
+
     // ── PASSWORD-RECOVERY RATE LIMITING ──
     // Same reasoning as login_attempts above, applied to "Forgot password"
     // requests: without a limit, someone could spam that form to flood a
@@ -1415,7 +1465,9 @@ function installDB(): void
         $legacyTin = null;
         $legacyTerminal = 'POS-01';
         try {
-            foreach ($db->query("SELECT key,value FROM settings") as $row) {
+            $isMy = ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql');
+            $kCol = $isMy ? '`key`' : 'key';
+            foreach ($db->query("SELECT {$kCol},value FROM settings") as $row) {
                 switch ($row['key']) {
                     case 'shop_name':
                         if (trim($row['value']) !== '') $legacyName = $row['value'];
@@ -2624,20 +2676,47 @@ if (isset($_GET['api'])) {
 
                             foreach ($items as $it) {
                                 $rawPid = !empty($it['product_id']) ? (int)$it['product_id'] : null;
-                                $validPId = null;
-                                if ($rawPid) {
-                                    $pChk = $db->prepare("SELECT id FROM products WHERE id = ?");
-                                    $pChk->execute([$rawPid]);
-                                    if ($pChk->fetchColumn()) {
-                                        $validPId = $rawPid;
-                                    }
-                                }
+                                $cloudPid = !empty($it['cloud_id']) ? (int)$it['cloud_id'] : null;
+                                $itBarcode = !empty($it['barcode']) ? trim((string)$it['barcode']) : null;
                                 $pName = trim((string)($it['product_name'] ?? 'Item'));
                                 $pCat = trim((string)($it['category_name'] ?? ''));
                                 $pPrice = (float)($it['price'] ?? ($it['unit_price'] ?? 0));
                                 $pQty = (int)($it['quantity'] ?? ($it['qty'] ?? 1));
                                 $pSub = (float)($it['subtotal'] ?? ($pPrice * $pQty));
                                 $pCost = isset($it['cost_price']) ? (float)$it['cost_price'] : null;
+
+                                $validPId = null;
+                                // 1. Try candidate IDs scoped to this store
+                                foreach (array_filter([$cloudPid, $rawPid]) as $candId) {
+                                    $pChk = $db->prepare("SELECT id FROM products WHERE id = ? AND store_id = ?");
+                                    $pChk->execute([$candId, $txStoreId]);
+                                    $foundId = $pChk->fetchColumn();
+                                    if ($foundId) {
+                                        $validPId = (int)$foundId;
+                                        break;
+                                    }
+                                }
+                                // 2. Try barcode scoped to this store
+                                if (!$validPId && $itBarcode !== null && $itBarcode !== '') {
+                                    $pChk = $db->prepare("SELECT id FROM products WHERE barcode = ? AND store_id = ? LIMIT 1");
+                                    $pChk->execute([$itBarcode, $txStoreId]);
+                                    $foundId = $pChk->fetchColumn();
+                                    if ($foundId) $validPId = (int)$foundId;
+                                }
+                                // 3. Try exact product name scoped to this store
+                                if (!$validPId && $pName !== '' && $pName !== 'Item') {
+                                    $pChk = $db->prepare("SELECT id FROM products WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND store_id = ? LIMIT 1");
+                                    $pChk->execute([$pName, $txStoreId]);
+                                    $foundId = $pChk->fetchColumn();
+                                    if ($foundId) $validPId = (int)$foundId;
+                                }
+                                // 4. Fallback: try rawPid
+                                if (!$validPId && $rawPid) {
+                                    $pChk = $db->prepare("SELECT id FROM products WHERE id = ?");
+                                    $pChk->execute([$rawPid]);
+                                    $foundId = $pChk->fetchColumn();
+                                    if ($foundId) $validPId = (int)$foundId;
+                                }
 
                                 if ($hasCostCol) {
                                     $insItem->execute([$cloudTxId, $validPId, $pName, $pCat, $pPrice, $pQty, $pSub, $h, $dow, $pCost]);
@@ -2705,6 +2784,14 @@ if (isset($_GET['api'])) {
     //   2. The real exception is also written to the PHP error log (visible
     //      in your InfinityFree file manager / control panel logs) so it
     //      can be root-caused even if the frontend message is generic.
+    // CONCURRENCY OPTIMIZATION: Release PHP session file lock immediately for
+    // read-heavy, checkout, sync, and reporting actions. This prevents long-running
+    // requests (sync_cloud, get_stats, export_dataset) from freezing concurrent
+    // checkout or barcode scan requests from the same cashier register!
+    if (!in_array($action, ['update_email'], true)) {
+        session_write_close();
+    }
+
     try {
         switch ($action) {
 
@@ -3669,132 +3756,186 @@ if (isset($_GET['api'])) {
             case 'add_transaction':
                 $items = (array)($body['items'] ?? []);
                 $cash = (float)($body['cash'] ?? 0);
-                if (!$items) json(false, null, 'No items');
-                // PERFORMANCE FIX: vat_rate/tax_rate were being re-queried from Supabase
-                // on every single "Process Payment" click. The API handler runs before
-                // $storeSettings is built (that only happens later, in the page-render
-                // flow), so read straight from the same per-session settings cache used
-                // there — falling back to a single DB query only if it isn't warm yet
-                // (e.g. this is the very first request of the session).
+                if (!$items) json(false, null, 'No items in cart');
+
                 $txnSettingsCacheKey = 'store_settings_' . currentStoreId();
                 if (isset($_SESSION[$txnSettingsCacheKey])) {
                     $txnSettings = $_SESSION[$txnSettingsCacheKey];
                 } else {
                     $txnSettings = [];
-                    $settingsStmt = $db->prepare("SELECT key,value FROM settings WHERE store_id=?");
+                    $isMy = ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql');
+                    $kCol = $isMy ? '`key`' : 'key';
+                    $settingsStmt = $db->prepare("SELECT {$kCol},value FROM settings WHERE store_id=?");
                     $settingsStmt->execute([currentStoreId()]);
                     foreach ($settingsStmt->fetchAll() as $setting) {
                         $txnSettings[$setting['key']] = $setting['value'];
                     }
-                    $_SESSION[$txnSettingsCacheKey] = $txnSettings;
                 }
                 $saleRates = [
                     'vat_rate' => max(0, (float)($txnSettings['vat_rate'] ?? 0)),
                     'tax_rate' => max(0, (float)($txnSettings['tax_rate'] ?? 0)),
                 ];
+
+                // Exact financial calculations via BCMath / precision helpers
                 $subtotal = 0.0;
                 foreach ($items as $item) {
-                    $subtotal += max(0, (float)($item['price'] ?? 0)) * max(1, (int)($item['qty'] ?? 1));
+                    $itemPrice = max(0, (float)($item['price'] ?? 0));
+                    $itemQty = max(1, (int)($item['qty'] ?? 1));
+                    $lineTotal = finMul($itemPrice, $itemQty);
+                    $subtotal = finAdd($subtotal, $lineTotal);
                 }
-                $vatAmount = round($subtotal * $saleRates['vat_rate'] / 100, 2);
-                $taxAmount = round($subtotal * $saleRates['tax_rate'] / 100, 2);
-                $total = round($subtotal + $vatAmount + $taxAmount, 2);
-                $chg = round($cash - $total, 2);
-                if ($cash < $total) json(false, null, 'Insufficient cash');
+                $vatRate = max(0, (float)($saleRates['vat_rate'] ?? 0));
+                $taxRate = max(0, (float)($saleRates['tax_rate'] ?? 0));
+                $vatAmount = finRound(finDiv(finMul($subtotal, $vatRate), 100));
+                $taxAmount = finRound(finDiv(finMul($subtotal, $taxRate), 100));
+                $total = finAdd(finAdd($subtotal, $vatAmount), $taxAmount);
+                $chg = finSub($cash, $total);
+                if ($cash < $total) json(false, null, 'Insufficient cash tendered');
+
                 $ref = 'ORD-' . strtoupper(substr(uniqid(), -6));
-                $db->beginTransaction();
-                try {
-                    $db->prepare("INSERT INTO transactions (store_id,order_ref,subtotal,vat_rate,vat_amount,tax_rate,tax_amount,total,cash,change,user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-                        ->execute([currentStoreId(), $ref, $subtotal, $saleRates['vat_rate'], $vatAmount, $saleRates['tax_rate'], $taxAmount, $total, $cash, $chg, $uid]);
-                    $txId = lastInsertedId($db);
-                    $h = (int)date('G');
-                    $dow = (int)date('N') - 1;
-                    // Detect whether transaction_items.cost_price actually exists on THIS
-                    // database before relying on it. A migration earlier in this file is
-                    // supposed to guarantee that column, but on this deployment it hasn't
-                    // taken effect — seen live as SQLSTATE[42703] "column cost_price does
-                    // not exist", which was failing EVERY single checkout outright. This
-                    // check makes checkout work either way: with per-line cost/profit
-                    // tracking when the column is present, without it otherwise — instead
-                    // of a missing column for a "nice to have" stat breaking actual sales.
-                    static $hasCostPriceCol = null;
-                    if ($hasCostPriceCol === null) {
-                        try {
-                            $colCheck = $db->query("SELECT column_name FROM information_schema.columns WHERE table_name='transaction_items' AND column_name='cost_price'");
-                            $hasCostPriceCol = (bool)$colCheck->fetchColumn();
-                        } catch (\Throwable $e) {
-                            $hasCostPriceCol = false;
-                        }
-                    }
-                    $si = $hasCostPriceCol
-                        ? $db->prepare("INSERT INTO transaction_items (transaction_id,product_id,product_name,category_name,price,quantity,subtotal,hour_of_day,day_of_week,cost_price) VALUES (?,?,?,?,?,?,?,?,?,?)")
-                        : $db->prepare("INSERT INTO transaction_items (transaction_id,product_id,product_name,category_name,price,quantity,subtotal,hour_of_day,day_of_week) VALUES (?,?,?,?,?,?,?,?,?)");
-                    // NOTE: this also deducts store_quantity (not just quantity) — the two
-                    // used to drift apart here (only `quantity` was touched), which made the
-                    // Warehouse page's Low Stock/Out of Stock/Expiring/Expired filters (which
-                    // key off store_quantity) fall out of sync with what was actually sold.
-                    $isPrivilegedUser = in_array($role, ['owner', 'admin'], true);
-                    $suStore = $db->prepare("UPDATE products SET quantity=GREATEST(0,quantity-?),store_quantity=GREATEST(0,store_quantity-?),total_sold=total_sold+?,total_revenue=total_revenue+? WHERE id=?");
-                    $suWh = $db->prepare("UPDATE warehouse_stock SET quantity=GREATEST(0,quantity-?) WHERE product_id=?");
-                    $suWhProd = $db->prepare("UPDATE products SET total_sold=total_sold+?,total_revenue=total_revenue+? WHERE id=?");
-                    $whLog = $db->prepare("INSERT INTO warehouse (store_id, product_id, type, qty_out, note, user_id, event_date) VALUES (?, ?, 'out', ?, ?, ?, CURRENT_DATE)");
-                    // Cost price is looked up per product_id so each line freezes what THIS
-                    // store's product actually costs right now — used for the Profit stat.
-                    $costLookup = $db->prepare("SELECT cost_price FROM products WHERE id=?");
-                    foreach ($items as $item) {
-                        $pid = (int)($item['product_id'] ?? 0);
-                        $qty = (int)($item['qty'] ?? 1);
-                        $price = (float)($item['price'] ?? 0);
-                        $sub = $price * $qty;
-                        $lineCost = null;
-                        if ($pid) {
-                            $costLookup->execute([$pid]);
-                            $cp = $costLookup->fetchColumn();
-                            $lineCost = ($cp !== false && $cp !== null) ? (float)$cp : null;
-                        }
-                        $si->execute($hasCostPriceCol
-                            ? [$txId, $pid ?: null, $item['name'] ?? '', $item['category_name'] ?? '', $price, $qty, $sub, $h, $dow, $lineCost]
-                            : [$txId, $pid ?: null, $item['name'] ?? '', $item['category_name'] ?? '', $price, $qty, $sub, $h, $dow]);
+                $isPrivilegedUser = in_array($role, ['owner', 'admin'], true);
 
-                        // Only Owner/Admin can deduct from warehouse stock; cashiers are forced to store stock
-                        $itemSource = (($item['stock_source'] ?? 'store') === 'warehouse' && $isPrivilegedUser) ? 'warehouse' : 'store';
+                // DEADLOCK PREVENTION: Sort cart items by product_id ASC so all concurrent
+                // transactions acquire row locks in the exact same deterministic sequence.
+                usort($items, function($a, $b) {
+                    return ((int)($a['product_id'] ?? 0)) <=> ((int)($b['product_id'] ?? 0));
+                });
 
-                        if ($pid) {
-                            if ($itemSource === 'warehouse') {
-                                $db->prepare("INSERT INTO warehouse_stock (product_id, quantity) VALUES (?, 0) ON CONFLICT (product_id) DO NOTHING")->execute([$pid]);
-                                $suWh->execute([$qty, $pid]);
-                                $suWhProd->execute([$qty, $sub, $pid]);
-                                try {
-                                    $whLog->execute([currentStoreId(), $pid, $qty, "POS Sale - Ref $ref", $uid]);
-                                } catch (\Throwable $we) {
-                                }
-                            } else {
-                                $suStore->execute([$qty, $qty, $qty, $sub, $pid]);
-                            }
-                        }
+                // Detect optional cost_price column once
+                static $hasCostPriceCol = null;
+                if ($hasCostPriceCol === null) {
+                    try {
+                        $colCheck = $db->query("SELECT column_name FROM information_schema.columns WHERE table_name='transaction_items' AND column_name='cost_price'");
+                        $hasCostPriceCol = (bool)$colCheck->fetchColumn();
+                    } catch (\Throwable $e) {
+                        $hasCostPriceCol = false;
                     }
-                    $db->commit();
-                    // Batch bookkeeping happens AFTER the sale is safely committed
-                    // and is wrapped per-item so it can never fail, roll back, or
-                    // delay the sale response — it's pure FEFO attribution on top
-                    // of a sale that has already gone through.
-                    foreach ($items as $item) {
-                        $pid = (int)($item['product_id'] ?? 0);
-                        $qty = (int)($item['qty'] ?? 1);
-                        if ($pid && $qty > 0) {
-                            $itemSource = (($item['stock_source'] ?? 'store') === 'warehouse' && $isPrivilegedUser) ? 'warehouse' : 'store';
-                            try {
-                                depleteBatchesFEFO($db, $pid, $qty, $itemSource);
-                                refreshProductExpiryFromBatches($db, $pid);
-                            } catch (Exception $e) {
-                            }
-                        }
-                    }
-                    json(true, ['id' => $txId, 'order_ref' => $ref]);
-                } catch (Exception $e) {
-                    $db->rollBack();
-                    json(false, null, $e->getMessage());
                 }
+
+                $maxTxRetries = 3;
+                $txId = null;
+                for ($attempt = 1; $attempt <= $maxTxRetries; $attempt++) {
+                    $db->beginTransaction();
+                    try {
+                        $isMy = ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql');
+                        $changeCol = $isMy ? '`change`' : '"change"';
+
+                        // 1. PESSIMISTIC ROW LOCKING & INVENTORY AVAILABILITY CHECK
+                        $lockStmt = $db->prepare("SELECT id, name, quantity, store_quantity FROM products WHERE id=? FOR UPDATE");
+                        $whLock = $db->prepare("SELECT quantity FROM warehouse_stock WHERE product_id=? FOR UPDATE");
+
+                        foreach ($items as $item) {
+                            $pid = (int)($item['product_id'] ?? 0);
+                            $qty = max(1, (int)($item['qty'] ?? 1));
+                            $itemSource = (($item['stock_source'] ?? 'store') === 'warehouse' && $isPrivilegedUser) ? 'warehouse' : 'store';
+
+                            if ($pid) {
+                                if ($itemSource === 'warehouse') {
+                                    $whLock->execute([$pid]);
+                                    $whAvail = (int)$whLock->fetchColumn();
+                                    if ($whAvail < $qty) {
+                                        throw new Exception("Item '{$item['name']}' has insufficient warehouse reserve (Available: {$whAvail}, Requested: {$qty})");
+                                    }
+                                } else {
+                                    $lockStmt->execute([$pid]);
+                                    $prodRow = $lockStmt->fetch();
+                                    if (!$prodRow) {
+                                        throw new Exception("Product #{$pid} not found in inventory");
+                                    }
+                                    $avail = (int)($prodRow['store_quantity'] ?? 0);
+                                    if ($avail < $qty) {
+                                        throw new Exception("Item '{$prodRow['name']}' is out of stock (Available: {$avail}, Requested: {$qty})");
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. INSERT TRANSACTION RECORD
+                        $db->prepare("INSERT INTO transactions (store_id,order_ref,subtotal,vat_rate,vat_amount,tax_rate,tax_amount,total,cash,$changeCol,user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                            ->execute([currentStoreId(), $ref, $subtotal, $saleRates['vat_rate'], $vatAmount, $saleRates['tax_rate'], $taxAmount, $total, $cash, $chg, $uid]);
+                        $txId = lastInsertedId($db);
+
+                        $h = (int)date('G');
+                        $dow = (int)date('N') - 1;
+
+                        $si = $hasCostPriceCol
+                            ? $db->prepare("INSERT INTO transaction_items (transaction_id,product_id,product_name,category_name,price,quantity,subtotal,hour_of_day,day_of_week,cost_price) VALUES (?,?,?,?,?,?,?,?,?,?)")
+                            : $db->prepare("INSERT INTO transaction_items (transaction_id,product_id,product_name,category_name,price,quantity,subtotal,hour_of_day,day_of_week) VALUES (?,?,?,?,?,?,?,?,?)");
+
+                        // 3. ATOMIC DECREMENT WITH BOUND CHECK
+                        $suStore = $db->prepare("UPDATE products SET quantity=quantity-?, store_quantity=store_quantity-?, total_sold=total_sold+?, total_revenue=total_revenue+? WHERE id=? AND store_quantity>=?");
+                        $suWh = $db->prepare("UPDATE warehouse_stock SET quantity=quantity-? WHERE product_id=? AND quantity>=?");
+                        $suWhProd = $db->prepare("UPDATE products SET total_sold=total_sold+?, total_revenue=total_revenue+? WHERE id=?");
+                        $whLog = $db->prepare("INSERT INTO warehouse (product_id, qty_out, note, created_by, event_date) VALUES (?, ?, ?, ?, CURRENT_DATE)");
+                        $costLookup = $db->prepare("SELECT cost_price FROM products WHERE id=?");
+
+                        foreach ($items as $item) {
+                            $pid = (int)($item['product_id'] ?? 0);
+                            $qty = max(1, (int)($item['qty'] ?? 1));
+                            $price = max(0, (float)($item['price'] ?? 0));
+                            $sub = finMul($price, $qty);
+                            $lineCost = null;
+                            if ($pid) {
+                                $costLookup->execute([$pid]);
+                                $cp = $costLookup->fetchColumn();
+                                $lineCost = ($cp !== false && $cp !== null) ? (float)$cp : null;
+                            }
+                            $si->execute($hasCostPriceCol
+                                ? [$txId, $pid ?: null, $item['name'] ?? '', $item['category_name'] ?? '', $price, $qty, $sub, $h, $dow, $lineCost]
+                                : [$txId, $pid ?: null, $item['name'] ?? '', $item['category_name'] ?? '', $price, $qty, $sub, $h, $dow]);
+
+                            $itemSource = (($item['stock_source'] ?? 'store') === 'warehouse' && $isPrivilegedUser) ? 'warehouse' : 'store';
+
+                            if ($pid) {
+                                if ($itemSource === 'warehouse') {
+                                    $suWh->execute([$qty, $pid, $qty]);
+                                    if ($suWh->rowCount() === 0) {
+                                        throw new Exception("Stock conflict: Item '{$item['name']}' warehouse reserve changed concurrently.");
+                                    }
+                                    $suWhProd->execute([$qty, $sub, $pid]);
+                                    try {
+                                        $whLog->execute([$pid, $qty, "POS Sale - Ref $ref", $uid]);
+                                    } catch (\Throwable $we) {}
+                                } else {
+                                    $suStore->execute([$qty, $qty, $qty, $sub, $pid, $qty]);
+                                    if ($suStore->rowCount() === 0) {
+                                        throw new Exception("Stock conflict: Item '{$item['name']}' is out of stock or was purchased by another cashier.");
+                                    }
+                                }
+                            }
+                        }
+
+                        $db->commit();
+                        break; // Success - break retry loop
+                    } catch (\Throwable $e) {
+                        if ($db->inTransaction()) {
+                            $db->rollBack();
+                        }
+                        $msg = $e->getMessage();
+                        $isDeadlock = str_contains($msg, '1213') || str_contains($msg, 'Deadlock') || str_contains($msg, '1205');
+                        if ($isDeadlock && $attempt < $maxTxRetries) {
+                            usleep(25000 * $attempt);
+                            continue;
+                        }
+                        json(false, null, $msg);
+                    }
+                }
+
+                // FEFO Batch bookkeeping after successful commit
+                foreach ($items as $item) {
+                    $pid = (int)($item['product_id'] ?? 0);
+                    $qty = max(1, (int)($item['qty'] ?? 1));
+                    if ($pid && $qty > 0) {
+                        $itemSource = (($item['stock_source'] ?? 'store') === 'warehouse' && $isPrivilegedUser) ? 'warehouse' : 'store';
+                        try {
+                            depleteBatchesFEFO($db, $pid, $qty, $itemSource);
+                            refreshProductExpiryFromBatches($db, $pid);
+                        } catch (Exception $e) {}
+                    }
+                }
+
+                json(true, ['id' => $txId, 'order_ref' => $ref]);
+                break;
                 break;
 
             case 'get_transactions':
@@ -4419,9 +4560,45 @@ if (isset($_GET['api'])) {
                     // the original success response — not a real failure. Say so
                     // instead of showing a scary, misleading error for something
                     // that actually already succeeded.
-                    $recent = $db->prepare("SELECT id FROM cash_floats WHERE user_id=? AND status='closed' AND logout_time >= (CURRENT_TIMESTAMP - INTERVAL '3 minutes') ORDER BY id DESC LIMIT 1");
+                    $recent = $db->prepare("SELECT * FROM cash_floats WHERE user_id=? AND status='closed' AND logout_time >= (CURRENT_TIMESTAMP - INTERVAL '5 minutes') ORDER BY id DESC LIMIT 1");
                     $recent->execute([$uid]);
-                    if ($recent->fetch()) json(false, null, 'This shift already closed successfully a moment ago — no need to resubmit. Check Cash Drawer status if unsure.');
+                    $recentShift = $recent->fetch();
+                    if ($recentShift) {
+                        $voidLogStmt = $db->prepare("SELECT id, product_name, qty_voided, amount_voided, reason, created_at FROM void_logs WHERE voided_by=? AND created_at>=? AND created_at<=? ORDER BY created_at ASC");
+                        $voidLogStmt->execute([$uid, $recentShift['login_time'], $recentShift['logout_time']]);
+                        $shiftVoids = $voidLogStmt->fetchAll();
+
+                        $txStmt = $db->prepare("SELECT order_ref, total, cash, change, created_at FROM transactions WHERE user_id=? AND created_at>=? AND created_at<=? ORDER BY created_at ASC");
+                        $txStmt->execute([$uid, $recentShift['login_time'], $recentShift['logout_time']]);
+                        $shiftTx = $txStmt->fetchAll();
+
+                        $itemsStmt = $db->prepare("SELECT ti.product_name, SUM(ti.quantity) AS qty, SUM(ti.subtotal) AS revenue FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.user_id=? AND t.created_at>=? AND t.created_at<=? GROUP BY ti.product_name ORDER BY qty DESC LIMIT 8");
+                        $itemsStmt->execute([$uid, $recentShift['login_time'], $recentShift['logout_time']]);
+                        $topItems = $itemsStmt->fetchAll();
+
+                        $itemCountStmt = $db->prepare("SELECT COALESCE(SUM(ti.quantity),0) FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id WHERE t.user_id=? AND t.created_at>=? AND t.created_at<=?");
+                        $itemCountStmt->execute([$uid, $recentShift['login_time'], $recentShift['logout_time']]);
+                        $totalItemsSold = (int)$itemCountStmt->fetchColumn();
+
+                        json(true, [
+                            'already_closed'    => true,
+                            'cashier_name'      => $_SESSION['full_name'] ?? ($_SESSION['username'] ?? 'Cashier'),
+                            'login_time'        => $recentShift['login_time'],
+                            'logout_time'       => $recentShift['logout_time'],
+                            'opening_float'     => (float)$recentShift['starting_float'],
+                            'cash_sales'        => (float)$recentShift['cash_sales'],
+                            'void_count'        => (int)$recentShift['total_void_count'],
+                            'void_value'        => (float)$recentShift['total_void_value'],
+                            'void_logs'         => $shiftVoids,
+                            'expected_cash'     => (float)$recentShift['expected_cash'],
+                            'closing_cash'      => (float)$recentShift['closing_cash'],
+                            'variance'          => (float)$recentShift['variance'],
+                            'transaction_count' => count($shiftTx),
+                            'items_sold'        => $totalItemsSold,
+                            'transactions'      => $shiftTx,
+                            'top_items'         => $topItems,
+                        ]);
+                    }
                     json(false, null, 'No active shift found — nothing to close');
                 }
                 $closingCash = (float)($body['total'] ?? -1);
@@ -5658,7 +5835,9 @@ if (loggedIn()) {
         $storeSettings = $_SESSION[$settingsCacheKey];
     } else {
         try {
-            $stmt = db()->prepare("SELECT key,value FROM settings WHERE store_id=?");
+            $isMy = (db()->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql');
+            $kCol = $isMy ? '`key`' : 'key';
+            $stmt = db()->prepare("SELECT {$kCol},value FROM settings WHERE store_id=?");
             $stmt->execute([currentStoreId()]);
             foreach ($stmt as $row) {
                 $storeSettings[$row['key']] = $row['value'];
@@ -15739,10 +15918,14 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             function openShiftCloseModal(loggingOut) {
                 apiGet('check_cash_float').then(r => {
-                    if (!r?.success || !r.data.initialized) {
+                    if (!r?.success || !r.data?.initialized) {
                         if (loggingOut) {
                             performLogout();
-                        } else toast('No active shift to close', 'warning');
+                        } else {
+                            if (confirm('No active shift is currently open. Would you like to log out now?')) {
+                                performLogout();
+                            }
+                        }
                         return;
                     }
                     shiftMode = 'close';
@@ -15764,6 +15947,10 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     // 7-Eleven flow: Cash drawer kicks open automatically for end of shift cash count
                     triggerShiftDrawerKick();
                     toast('Cash drawer released — begin your closing count', 'default');
+                }).catch(() => {
+                    if (confirm('No active shift is currently open. Would you like to log out now?')) {
+                        performLogout();
+                    }
                 });
             }
 
@@ -15777,7 +15964,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             // Nav End Shift button
             function requestEndShift() {
-                openShiftCloseModal(false);
+                openShiftCloseModal(true);
             }
 
             // Intercepts the Logout link — forces a closing cash count first if a shift is open
@@ -15910,6 +16097,13 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     }).then(async r => {
                         setLoading(btn, false);
                         if (!r?.success) {
+                            if (r?.error && (r.error.includes('already closed') || r.error.includes('already closed successfully'))) {
+                                toast('Shift already closed. Logging out...', 'info');
+                                triggerShiftDrawerKick();
+                                closeModal('shift-modal');
+                                setTimeout(performLogout, 800);
+                                return;
+                            }
                             toast(r?.error || 'Could not close shift', 'error');
                             return;
                         }
@@ -15917,13 +16111,31 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         triggerShiftDrawerKick();
                         closeModal('shift-modal');
 
-                        // 7-Eleven flow: Print End of Shift Z-Reading Summary
-                        await printShiftReceipt(r.data);
-
-                        // Wipe session only after the receipt has been handed to the printer
-                        setTimeout(() => {
+                        let logoutDone = false;
+                        const finalizeLogout = () => {
+                            if (logoutDone) return;
+                            logoutDone = true;
                             performLogout();
-                        }, 1200);
+                        };
+
+                        window.__posReceiptCallback = finalizeLogout;
+
+                        // 7-Eleven flow: Print End of Shift Z-Reading Summary
+                        if (r.data) {
+                            toast('Shift closed! Printing Z-Reading Summary...', 'info');
+                            printShiftReceipt(r.data).then(printedNative => {
+                                if (printedNative) {
+                                    setTimeout(finalizeLogout, 1500);
+                                }
+                            }).catch(() => {});
+                        }
+
+                        // Generous safety timer: if the cashier cancels or completes the print dialog, logout after 8s
+                        setTimeout(finalizeLogout, 8000);
+                    }).catch(err => {
+                        setLoading(btn, false);
+                        toast('Connection notice: Logging out...', 'info');
+                        setTimeout(performLogout, 1000);
                     });
                 }
             }
@@ -15977,7 +16189,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     '  if (__didPrint) return;' +
                     '  __didPrint = true;' +
                     '  try{ window.focus(); window.print(); }catch(e){}' +
-                    '  window.onafterprint = function(){ setTimeout(function(){ try{ if(window.frameElement) window.frameElement.remove(); else window.close(); }catch(e){} }, 400); };' +
+                    '  window.onafterprint = function(){' +
+                    '    setTimeout(function(){' +
+                    '      try{ if(window.frameElement) window.frameElement.remove(); else window.close(); }catch(e){}' +
+                    '      try{ if(window.parent && typeof window.parent.__posReceiptCallback === "function") window.parent.__posReceiptCallback(); }catch(e){}' +
+                    '    }, 400);' +
+                    '  };' +
                     '}' +
                     'if (document.readyState === "complete") { setTimeout(doPrint, 150); }' +
                     'else { window.addEventListener("load", function(){ setTimeout(doPrint, 150); }); }' +
@@ -16031,7 +16248,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     const nativeOk = await tryNativePrintAgent(nativePayload);
                     if (nativeOk) {
                         toast('Shift summary Z-Read printed directly to thermal printer', 'success');
-                        return;
+                        return true;
                     }
                 } catch (e) {}
 
@@ -16114,6 +16331,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     receiptPrintScript() +
                     '</body></html>';
                 executeUniversalReceiptPrint(zReceiptHtml);
+                return false;
             }
 
             // ── IMAGE HELPERS ──
@@ -17868,7 +18086,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             async function tryNativePrintAgent(payload) {
                 try {
                     const ctrl = new AbortController();
-                    const timer = setTimeout(() => ctrl.abort(), 600);
+                    const timer = setTimeout(() => ctrl.abort(), 3000);
                     const res = await fetch('http://127.0.0.1:9100/print', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -25441,6 +25659,10 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         }
                     }, true);
 
+                    let _lastRoutedBarcode = '';
+                    let _lastRoutedTime = 0;
+                    const SCAN_DEBOUNCE_MS = 320;
+
                     function routeHIDScan(barcode) {
                         // 1. Remove non-printable ASCII control characters (\x00-\x1F, \x7F)
                         barcode = String(barcode || '').replace(/[\x00-\x1F\x7F]/g, '');
@@ -25449,6 +25671,14 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         // 3. Normalise: strip leading/trailing whitespace
                         barcode = barcode.trim();
                         if (!barcode) return;
+
+                        // 4. DEBOUNCE: Suppress hardware scanner double-trigger bounce of the identical code within 320ms
+                        const now = Date.now();
+                        if (barcode === _lastRoutedBarcode && (now - _lastRoutedTime) < SCAN_DEBOUNCE_MS) {
+                            return;
+                        }
+                        _lastRoutedBarcode = barcode;
+                        _lastRoutedTime = now;
 
                         // 0. Scanning receipt barcode (format ORD-XXXXXX) jumps straight into Void flow
                         if (/^ORD-[A-Z0-9]{4,}$/i.test(barcode)) {

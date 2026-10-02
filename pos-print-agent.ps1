@@ -47,28 +47,36 @@ public class RawPrinterHelper {
     public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);
 
     public static bool SendBytesToPrinter(string szPrinterName, byte[] pBytes) {
-        IntPtr hPrinter = IntPtr.Zero;
-        DOCINFOA di = new DOCINFOA();
-        di.pDocName = "POS Auto Receipt";
-        di.pDataType = "RAW";
-        if (OpenPrinter(szPrinterName.Normalize(), out hPrinter, IntPtr.Zero)) {
-            if (StartDocPrinter(hPrinter, 1, di)) {
-                if (StartPagePrinter(hPrinter)) {
-                    IntPtr pUnmanagedBytes = Marshal.AllocCoTaskMem(pBytes.Length);
-                    Marshal.Copy(pBytes, 0, pUnmanagedBytes, pBytes.Length);
-                    int dwWritten = 0;
-                    bool success = WritePrinter(hPrinter, pUnmanagedBytes, pBytes.Length, out dwWritten);
-                    Marshal.FreeCoTaskMem(pUnmanagedBytes);
-                    EndPagePrinter(hPrinter);
-                    EndDocPrinter(hPrinter);
+        bool result = false;
+        System.Threading.Thread t = new System.Threading.Thread(() => {
+            IntPtr hPrinter = IntPtr.Zero;
+            DOCINFOA di = new DOCINFOA();
+            di.pDocName = "POS Auto Receipt";
+            di.pDataType = "RAW";
+            try {
+                if (OpenPrinter(szPrinterName.Normalize(), out hPrinter, IntPtr.Zero)) {
+                    if (StartDocPrinter(hPrinter, 1, di)) {
+                        if (StartPagePrinter(hPrinter)) {
+                            IntPtr pUnmanagedBytes = Marshal.AllocCoTaskMem(pBytes.Length);
+                            Marshal.Copy(pBytes, 0, pUnmanagedBytes, pBytes.Length);
+                            int dwWritten = 0;
+                            result = WritePrinter(hPrinter, pUnmanagedBytes, pBytes.Length, out dwWritten);
+                            Marshal.FreeCoTaskMem(pUnmanagedBytes);
+                            EndPagePrinter(hPrinter);
+                        }
+                        EndDocPrinter(hPrinter);
+                    }
                     ClosePrinter(hPrinter);
-                    return success;
                 }
-                EndDocPrinter(hPrinter);
-            }
-            ClosePrinter(hPrinter);
+            } catch {}
+        });
+        t.IsBackground = true;
+        t.Start();
+        if (!t.Join(1500)) {
+            try { t.Abort(); } catch {}
+            return false;
         }
-        return false;
+        return result;
     }
 }
 "@
@@ -131,7 +139,7 @@ function Format-ReceiptLine {
 }
 
 # Helper to build ESC/POS binary data for a receipt
-function Build-EscPosReceipt {
+function New-EscPosReceipt {
     param([PSCustomObject]$data)
     
     $ms = New-Object System.IO.MemoryStream
@@ -268,9 +276,10 @@ function Build-EscPosReceipt {
     $ms.Close()
     return $result
 }
+Set-Alias -Name Build-EscPosReceipt -Value New-EscPosReceipt
 
 # Helper to build ESC/POS binary data for a Shift Start / Cash Float Slip
-function Build-EscPosShiftStart {
+function New-EscPosShiftStart {
     param([PSCustomObject]$data)
 
     $ms = New-Object System.IO.MemoryStream
@@ -366,9 +375,10 @@ function Build-EscPosShiftStart {
     $ms.Close()
     return $result
 }
+Set-Alias -Name Build-EscPosShiftStart -Value New-EscPosShiftStart
 
 # Helper to build ESC/POS binary data for an End of Shift Z-Reading Summary
-function Build-EscPosShiftSummary {
+function New-EscPosShiftSummary {
     param([PSCustomObject]$data)
 
     $ms = New-Object System.IO.MemoryStream
@@ -485,6 +495,8 @@ function Build-EscPosShiftSummary {
     $ms.Close()
     return $result
 }
+Set-Alias -Name Build-EscPosShiftSummary -Value New-EscPosShiftSummary
+
 
 # Start HTTP Listener
 $listener = New-Object System.Net.HttpListener
@@ -545,6 +557,13 @@ while ($listener.IsListening) {
 
         # Drawer kick endpoint - Instant hardware pulse with universal pin coverage
         if ($req.HttpMethod -eq "POST" -and $req.Url.AbsolutePath -eq "/drawer") {
+            try {
+                if ($req.HasEntityBody) {
+                    $reader = New-Object System.IO.StreamReader($req.InputStream, $req.ContentEncoding)
+                    $null = $reader.ReadToEnd()
+                    $reader.Close()
+                }
+            } catch {}
             $target = $script:actualPrinter
             $printSuccess = [RawPrinterHelper]::SendBytesToPrinter($target, $script:DRAWER_PULSE)
             Write-Host "[DRAWER] Cash drawer kick pulse sent -> Printer: $target (Success: $printSuccess)" -ForegroundColor Cyan
@@ -573,13 +592,13 @@ while ($listener.IsListening) {
             $printType = if ($data.type) { "$($data.type)" } else { "sale" }
             if ($printType -eq "shift_start") {
                 Write-Host "[PRINT] Shift Start / Cash Float Slip -> Printer: $target" -ForegroundColor Green
-                $escPosBytes = Build-EscPosShiftStart -data $data
+                $escPosBytes = New-EscPosShiftStart -data $data
             } elseif ($printType -eq "shift_summary" -or $printType -eq "z_read") {
                 Write-Host "[PRINT] Shift Summary / Z-Reading -> Printer: $target" -ForegroundColor Green
-                $escPosBytes = Build-EscPosShiftSummary -data $data
+                $escPosBytes = New-EscPosShiftSummary -data $data
             } else {
                 Write-Host "[PRINT] Order receipt print request: $($data.ref) -> Printer: $target" -ForegroundColor Green
-                $escPosBytes = Build-EscPosReceipt -data $data
+                $escPosBytes = New-EscPosReceipt -data $data
             }
 
             $printSuccess = [RawPrinterHelper]::SendBytesToPrinter($target, $escPosBytes)

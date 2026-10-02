@@ -58,6 +58,6 @@ if exist "%~dp0start-print-agent-silent.vbs" (
 :: --unsafely-treat-insecure-origin-as-secure: Allows HTTPS cloud POS to talk to local HTTP print agent on 127.0.0.1:9100
 :: --allow-running-insecure-content: Prevents mixed-content blocking of port 9100
 :: --app: Launches as a clean standalone desktop PWA window
-start "" %BROWSER_PATH% --kiosk-printing --user-data-dir="%PROFILE_DIR%" --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:9100 --allow-running-insecure-content --app="https://pos-system-so8z.onrender.com/?page=dashboard"
+start "" %BROWSER_PATH% --kiosk-printing --user-data-dir="%PROFILE_DIR%" --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:9100 --allow-running-insecure-content --app="https://jau-pos-system.onrender.com/?page=dashboard"
 
 exit
