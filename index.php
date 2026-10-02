@@ -16365,17 +16365,10 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             // ── LOADING BUTTON ──
             function setLoading(btn, on) {
                 if (!btn) return;
-                clearTimeout(btn._slowTimer);
                 if (on) {
                     btn.dataset.orig = btn.innerHTML;
                     btn.innerHTML = '<span class="spinner"></span>';
                     btn.disabled = true;
-                    // If a save is still going after 6s, say so — a bare spinner with no
-                    // change for that long reads as "frozen" on slow/free hosting, which is
-                    // exactly what prompted people to tap Save again or give up.
-                    btn._slowTimer = setTimeout(() => {
-                        if (btn.disabled) btn.innerHTML = '<span class="spinner"></span> <span style="font-size:.72rem;">still working…</span>';
-                    }, 6000);
                 } else {
                     btn.innerHTML = btn.dataset.orig || btn.innerHTML;
                     btn.disabled = false;
@@ -17900,8 +17893,10 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 }
             }
 
+            let _paymentInProgress = false;
             function processPayment() {
                 if (!cart.length) return;
+                if (_paymentInProgress) return;
                 const btn = document.getElementById('pay-btn');
                 const totals = cartTotals();
                 const total = totals.total;
@@ -17911,7 +17906,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     toast('Insufficient cash!', 'error');
                     return;
                 }
-                setLoading(btn, true);
+                _paymentInProgress = true;
+                if (btn) { btn.dataset.orig = btn.innerHTML; btn.innerHTML = '<span class="spinner"></span>'; btn.disabled = true; }
                 // The backend stores subtotal as price*qty, so we send the *effective*
                 // blended unit price (smart subtotal ÷ qty) rather than the plain piece
                 // price — that keeps recorded revenue correct even when part of the
@@ -17939,7 +17935,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     change: chg
                 };
                 apiPost('add_transaction', txPayload).then(r => {
-                    setLoading(btn, false);
+                    _paymentInProgress = false;
+                    if (btn) { btn.innerHTML = btn.dataset.orig || 'Process Payment'; btn.disabled = false; }
 
                     // Real server-side rejection (e.g. stock validation) — NOT a connectivity
                     // issue, so the sale must not be queued or completed; let the cashier fix

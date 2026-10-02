@@ -159,20 +159,13 @@ powershell -NoProfile -Command "
     Write-Host '  [OK] Thermal Print Agent shortcut created in Windows Startup.' -ForegroundColor Green;
 "
 
-:: 8. Create Desktop Shortcut for ProCast POS
-echo [*] Creating Desktop Shortcut for Cashier Register...
-powershell -NoProfile -Command "
-    $ws = New-Object -ComObject WScript.Shell;
-    $desktop = [System.Environment]::GetFolderPath('Desktop');
-    $sc = $ws.CreateShortcut(\"$desktop\ProCast POS.lnk\");
-    $targetUrl = 'http://localhost/' + ('!TARGET_DIR!'.Replace('%XAMPP_DIR%\htdocs\', '').Replace('\', '/')) + '/';
-    $sc.TargetPath = 'chrome.exe';
-    $sc.Arguments = '--app=' + $targetUrl;
-    $sc.Description = 'ProCast Retail POS';
-    $sc.IconLocation = '!TARGET_DIR!\icons\icon-512.png';
-    $sc.Save();
-    Write-Host '  [OK] Desktop shortcut created: ' $targetUrl -ForegroundColor Green;
-"
+:: 8. Create Desktop Shortcuts for 0-Click Silent Auto-Printing (Local & Online)
+echo [*] Creating Desktop Shortcuts for Silent Auto-Printing...
+if exist "!TARGET_DIR!\CREATE-DESKTOP-SHORTCUTS.bat" (
+    call "!TARGET_DIR!\CREATE-DESKTOP-SHORTCUTS.bat" >nul 2>&1
+    echo   [OK] Created 'ProCast POS (Local - Silent Auto-Print)' on Desktop.
+    echo   [OK] Created 'ProCast POS (Online Cloud - Silent Auto-Print)' on Desktop.
+)
 
 :: 9. Start Background Print Agent now if not running
 powershell -NoProfile -Command "
@@ -195,8 +188,14 @@ echo.
 echo   Local App URL:  http://localhost/
 echo   Print Agent:    http://127.0.0.1:9100/status
 echo   Database:       pos_system on 127.0.0.1:3306 (user: root)
+echo   Printing Mode:  0-Click Silent Auto-Print (NO Ctrl+P required)
 echo.
-echo Press any key to launch ProCast POS in your browser...
+echo Press any key to launch ProCast POS in Silent Auto-Print mode...
 pause > nul
-start "" "http://localhost/offline_POS-System/pos_system-main/Offline_Pos_System/"
+if exist "!TARGET_DIR!\START-POS-LOCAL.bat" (
+    start "" "!TARGET_DIR!\START-POS-LOCAL.bat"
+) else (
+    start "" "http://localhost/offline_POS-System/pos_system-main/Offline_Pos_System/"
+)
 exit /b 0
+

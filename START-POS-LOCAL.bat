@@ -1,5 +1,5 @@
 @echo off
-title ProCast POS - Online Cloud Auto-Print Launcher
+title ProCast POS - Local Auto-Print Launcher
 cd /d "%~dp0"
 
 :: 1. Locate Google Chrome or Microsoft Edge
@@ -39,12 +39,27 @@ if not defined BROWSER_PATH (
     exit /b 1
 )
 
-:: 2. Start Native Print Agent in background (Port 9100)
+:: 2. Ensure Apache and MySQL are running
+powershell -NoProfile -Command "$t = New-Object System.Net.Sockets.TcpClient; try { $t.Connect('127.0.0.1', 80); exit 0 } catch { exit 1 }"
+if %ERRORLEVEL% NEQ 0 (
+    if exist "C:\xampp\apache\bin\httpd.exe" (
+        start "" "C:\xampp\apache\bin\httpd.exe"
+    )
+)
+
+powershell -NoProfile -Command "$t = New-Object System.Net.Sockets.TcpClient; try { $t.Connect('127.0.0.1', 3306); exit 0 } catch { exit 1 }"
+if %ERRORLEVEL% NEQ 0 (
+    if exist "C:\xampp\mysql\bin\mysqld.exe" (
+        start "" "C:\xampp\mysql\bin\mysqld.exe" --defaults-file="C:\xampp\mysql\bin\my.ini"
+    )
+)
+
+:: 3. Start Native Print Agent in background (Port 9100)
 if exist "%~dp0start-print-agent-silent.vbs" (
     start "" wscript.exe "%~dp0start-print-agent-silent.vbs"
 )
 
-:: 3. Setup Dedicated POS Profile Directory
+:: 4. Setup Dedicated POS Profile Directory
 set "PROFILE_DIR=C:\POS-Profile"
 if not exist "C:\POS-Profile" (
     mkdir "C:\POS-Profile" 2>nul
@@ -53,10 +68,10 @@ if not exist "C:\POS-Profile" (
     set "PROFILE_DIR=%LOCALAPPDATA%\POS-Profile"
 )
 
-:: 4. Cloud Production Target URL
-set "TARGET_URL=https://jau-pos-system.onrender.com/?page=dashboard"
+:: 5. Determine Local URL
+set "TARGET_URL=http://localhost/offline_POS-System/pos_system-main/Offline_Pos_System/?page=dashboard"
 
-:: 5. Launch in Standalone App Window with 0-Click Silent Kiosk Printing
+:: 6. Launch in Standalone App Window with 0-Click Silent Kiosk Printing
 start "" "%BROWSER_PATH%" --kiosk-printing --user-data-dir="%PROFILE_DIR%" --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:9100,http://localhost:9100 --allow-running-insecure-content --disable-features=Translate --app="%TARGET_URL%"
 
 exit /b 0
