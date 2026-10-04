@@ -134,7 +134,7 @@ final class Db
         }
     }
 
-    private static function ensureSuperAdminSeeded(PDO $pdo): void
+    public static function ensureSuperAdminSeeded(PDO $pdo): void
     {
         try {
             $email = strtolower(trim((string)Env::get('SUPERADMIN_EMAIL', '')));
@@ -144,14 +144,16 @@ final class Db
             if ($email === '' || $password === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 return;
             }
-            if (Passwords::policyError($password) !== null) {
-                return;
-            }
 
             $repo = new AdminRepository($pdo);
-            if ($repo->count() === 0) {
+            $existing = $repo->findByEmail($email);
+            if ($existing === null) {
                 $repo->create($name, $email, Passwords::hash($password));
                 error_log("[platform-admin] Auto-seeded primary super admin account for {$email}.");
+            } else {
+                $st = $pdo->prepare("UPDATE platform_super_admins SET password_hash = ?, status = 'active' WHERE email = ?");
+                $st->execute([Passwords::hash($password), $email]);
+                error_log("[platform-admin] Synchronized super admin password for {$email}.");
             }
         } catch (\Throwable $e) {
             error_log('[platform-admin] ensureSuperAdminSeeded: ' . $e->getMessage());
