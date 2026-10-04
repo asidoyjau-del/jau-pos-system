@@ -23,8 +23,12 @@ use ProCast\Support\StoreRepository;
 final class Kernel
 {
     private const ASSETS = [
-        'admin.css' => 'text/css; charset=utf-8',
-        'admin.js'  => 'application/javascript; charset=utf-8',
+        'admin.css'     => 'text/css; charset=utf-8',
+        'admin.js'      => 'application/javascript; charset=utf-8',
+        // QR code generator (qrcodejs 1.0.0) — bundled locally because the
+        // strict CSP below only allows same-origin scripts, and 2FA
+        // enrollment must work on fully-offline installs.
+        'qrcode.min.js' => 'application/javascript; charset=utf-8',
     ];
 
     private ?PDO $pdo = null;
