@@ -201,28 +201,70 @@ function initTotpQr() {
   const uri = document.getElementById('totp-otpauth')?.value;
   if (!box || !uri) return;
 
-  if (typeof QRCode !== 'undefined') {
-    new QRCode(box, {
-      text: uri,
-      width: 180,
-      height: 180,
-      colorDark: '#000000',
-      colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.M,
-    });
-    // Style the generated image
-    setTimeout(() => {
-      const img = box.querySelector('img');
-      if (img) {
-        img.style.borderRadius = '8px';
-        img.style.display = 'block';
-        img.style.margin = '0 auto';
-      }
-    }, 50);
-  } else {
-    // Fallback: show open-in-app link prominently
-    box.innerHTML = '<p style="padding:20px;color:var(--text-3);font-size:.8rem">QR code could not load.<br>Use the button below instead.</p>';
+  // One-shot guard: must never stack a second QR (double script include,
+  // hot reload, re-init, etc.) — always start from a clean container.
+  if (box.dataset.qrInit === '1') return;
+  box.dataset.qrInit = '1';
+  box.innerHTML = '';
+
+  if (typeof QRCode === 'undefined') {
+    box.innerHTML = '<p style="padding:20px;color:var(--text-3);font-size:.8rem">QR code could not load.<br>Use the key below instead.</p>';
+    return;
   }
+
+  new QRCode(box, {
+    text: uri,
+    width: 180,
+    height: 180,
+    colorDark: '#000000',
+    colorLight: '#ffffff',
+    correctLevel: QRCode.CorrectLevel.M,
+  });
+
+  // qrcodejs paints a canvas first, then (async) swaps to an <img> built
+  // from it. Keep exactly ONE of the two visible and centred at all times.
+  setTimeout(() => {
+    const img = box.querySelector('img');
+    const canvas = box.querySelector('canvas');
+    if (img && img.getAttribute('src')) {
+      img.style.display = 'block';
+      if (canvas) canvas.style.display = 'none';
+    } else if (canvas) {
+      canvas.style.display = 'block';
+    }
+  }, 80);
+}
+
+/* ── TOTP secret: one-click copy ─────────────────────────────── */
+function initSecretCopy() {
+  const btn = document.getElementById('btn-copy-secret');
+  const el  = document.getElementById('totp-secret');
+  if (!btn || !el) return;
+
+  btn.addEventListener('click', async () => {
+    const key = el.textContent.replace(/\s+/g, ''); // spaces are display-only
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(key);
+        ok = true;
+      }
+    } catch (_) { /* fall through to the legacy path below */ }
+    if (!ok) {
+      const ta = document.createElement('textarea');
+      ta.value = key;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+      document.body.removeChild(ta);
+    }
+    btn.textContent = ok ? '✓ Copied!' : 'Select & copy';
+    btn.classList.toggle('copied', ok);
+    setTimeout(() => { btn.textContent = '📋 Copy'; btn.classList.remove('copied'); }, 2200);
+  });
 }
 
 /* ── Initialise ──────────────────────────────────────────────── */
@@ -233,4 +275,5 @@ document.addEventListener('DOMContentLoaded', () => {
   initUserSearch();
   initStoreSearch();
   initTotpQr();
+  initSecretCopy();
 });
