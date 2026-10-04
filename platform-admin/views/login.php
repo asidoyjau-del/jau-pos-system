@@ -1,7 +1,11 @@
 ﻿<?php
-/** @var string|null $error @var string $csrf */
+/** @var string|null $error @var string $csrf @var bool $twoFactor */
+use ProCast\Support\Env;
 use ProCast\Support\View;
 $e = [View::class, 'e'];
+// Convenience only: prefill the owner email so signing in is a single step.
+$defaultEmail = Env::superAdminEnvEmail();
+$twoFactor = $twoFactor ?? false;
 ?><!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29,6 +33,7 @@ $e = [View::class, 'e'];
       <div class="form-group">
         <label class="form-label" for="login-email">Email address</label>
         <input id="login-email" type="email" name="email" class="form-control"
+               value="<?= $e($defaultEmail) ?>"
                placeholder="admin@procast.app" autocomplete="username" required autofocus>
       </div>
       <div class="form-group">
@@ -41,9 +46,11 @@ $e = [View::class, 'e'];
       </button>
     </form>
 
+    <?php if ($twoFactor): ?>
     <p class="text-muted" style="text-align:center;margin-top:20px;font-size:.72rem">
       Two-factor authentication required on the next step.
     </p>
+    <?php endif; ?>
   </div>
 </div>
 <script src="/platform-admin/assets/admin.js"></script>
