@@ -44,6 +44,9 @@ final class SuperAdminAuthController
         $email = strtolower(trim($req->input('email')));
         $password = $req->input('password');
 
+        // Ensure database has super admin seeded/updated
+        Db::ensureSuperAdminSeeded($this->db);
+
         if ($this->throttle->isBlocked($req->ip, $email, $now)) {
             Audit::log($this->db, null, Audit::LOGIN_BLOCKED, null, $req->ip, $req->userAgent, ['email' => $email, 'stage' => 'password']);
             return $this->loginView($session, 'Too many failed attempts. Try again in 15 minutes.', 429);
@@ -53,6 +56,22 @@ final class SuperAdminAuthController
         // Always run a verification so timing doesn't reveal whether the email exists.
         $hash = is_array($admin) ? (string)$admin['password_hash'] : Passwords::dummyHash();
         $passwordOk = Passwords::verify($password, $hash);
+
+        // Fallback: if credentials match the Render environment variables directly, sync and authenticate
+        $envEmail = strtolower(trim((string)\ProCast\Support\Env::get('SUPERADMIN_EMAIL', '')));
+        $envPassword = (string)\ProCast\Support\Env::get('SUPERADMIN_PASSWORD', '');
+        if (!$passwordOk && $envEmail !== '' && $envEmail === $email && $envPassword !== '' && hash_equals($envPassword, $password)) {
+            $passwordOk = true;
+            if ($admin === null) {
+                $name = trim((string)\ProCast\Support\Env::get('SUPERADMIN_NAME', 'Platform Administrator'));
+                $this->admins->create($name, $email, Passwords::hash($password));
+                $admin = $this->admins->findByEmail($email);
+            } else {
+                $this->db->prepare("UPDATE platform_super_admins SET password_hash = ?, status = 'active' WHERE id = ?")
+                    ->execute([Passwords::hash($password), (int)$admin['id']]);
+                $admin['status'] = 'active';
+            }
+        }
 
         if (!$admin || !$passwordOk || $admin['status'] !== 'active') {
             $this->throttle->recordFailure('login', $req->ip, $email, $now);
