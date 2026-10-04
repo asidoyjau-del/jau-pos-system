@@ -19,8 +19,10 @@ use ProCast\Support\View;
 use ProCast\Support\Passwords;
 
 /**
- * Login = password (Argon2id) THEN mandatory TOTP. A session only becomes
- * "super_admin_authenticated" after both succeed. Every failure feeds the
+ * Login = password (Argon2id), then TOTP only when SUPERADMIN_REQUIRE_2FA=true.
+ * With the default (2FA off) a correct password establishes the session and
+ * redirects straight to /monitoring — the owner account configured in Render
+ * signs in with email + password and nothing else. Failures still feed the
  * 5-per-15-minutes throttle and the append-only audit trail.
  */
 final class SuperAdminAuthController
@@ -49,9 +51,21 @@ final class SuperAdminAuthController
         // Ensure database has super admin seeded/updated
         Db::ensureSuperAdminSeeded($this->db);
 
+        $envEmail    = Env::superAdminEnvEmail();
+        $envPassword = (string)Env::get('SUPERADMIN_PASSWORD', '');
+        // The account configured in Render owns this deployment. It is exempt
+        // from the lockout so a mistyped password can never strand it.
+        $isEnvOwner = $envEmail !== '' && $envEmail === $email;
+        $envCredsOk = $isEnvOwner && $envPassword !== '' && hash_equals($envPassword, $password);
+
         if ($this->throttle->isBlocked($req->ip, $email, $now)) {
-            Audit::log($this->db, null, Audit::LOGIN_BLOCKED, null, $req->ip, $req->userAgent, ['email' => $email, 'stage' => 'password']);
-            return $this->loginView($session, 'Too many failed attempts. Try again in 15 minutes.', 429);
+            if ($envCredsOk) {
+                // Exact owner credentials: wipe the counter and let it through.
+                $this->throttle->clear($req->ip, $email);
+            } else {
+                Audit::log($this->db, null, Audit::LOGIN_BLOCKED, null, $req->ip, $req->userAgent, ['email' => $email, 'stage' => 'password']);
+                return $this->loginView($session, 'Too many failed attempts. Try again in 15 minutes.', 429);
+            }
         }
 
         $admin = ($email !== '' && strlen($email) <= 190) ? $this->admins->findByEmail($email) : null;
@@ -60,9 +74,7 @@ final class SuperAdminAuthController
         $passwordOk = Passwords::verify($password, $hash);
 
         // Fallback: if credentials match the Render environment variables directly, sync and authenticate
-        $envEmail = strtolower(trim((string)\ProCast\Support\Env::get('SUPERADMIN_EMAIL', '')));
-        $envPassword = (string)\ProCast\Support\Env::get('SUPERADMIN_PASSWORD', '');
-        if (!$passwordOk && $envEmail !== '' && $envEmail === $email && $envPassword !== '' && hash_equals($envPassword, $password)) {
+        if (!$passwordOk && $envCredsOk) {
             $passwordOk = true;
             if ($admin === null) {
                 $name = trim((string)\ProCast\Support\Env::get('SUPERADMIN_NAME', 'Platform Administrator'));
@@ -79,6 +91,11 @@ final class SuperAdminAuthController
             $this->throttle->recordFailure('login', $req->ip, $email, $now);
             Audit::log($this->db, is_array($admin) ? (int)$admin['id'] : null, Audit::LOGIN_FAILED, null, $req->ip, $req->userAgent, ['email' => $email]);
             return $this->loginView($session, 'Invalid credentials.', 401);
+        }
+
+        // ── Simple login (default): password is enough, no second step ────────
+        if (!Env::superAdminTwoFactorRequired()) {
+            return $this->completeLogin($session, $admin, $req, $now);
         }
 
         // Password accepted — NOT logged in yet. Park a short-lived pending marker.
@@ -99,6 +116,10 @@ final class SuperAdminAuthController
     /** @param array<string,mixed> $session */
     public function showVerify(Request $req, array &$session, int $now): Response
     {
+        // 2FA turned off: there is no pending step to complete.
+        if (!Env::superAdminTwoFactorRequired()) {
+            return $this->abortPending($session);
+        }
         $admin = $this->pendingAdmin($req, $session, $now);
         if ($admin === null) {
             return $this->abortPending($session);
@@ -109,6 +130,11 @@ final class SuperAdminAuthController
     /** @param array<string,mixed> $session */
     public function verify(Request $req, array &$session, int $now): Response
     {
+        // 2FA turned off: never accept a code step, even if a stale pending
+        // marker somehow survives (e.g. 2FA was disabled mid-session).
+        if (!Env::superAdminTwoFactorRequired()) {
+            return $this->abortPending($session);
+        }
         $admin = $this->pendingAdmin($req, $session, $now);
         if ($admin === null) {
             return $this->abortPending($session);
@@ -140,14 +166,8 @@ final class SuperAdminAuthController
             Audit::log($this->db, (int)$admin['id'], Audit::TOTP_ENROLLED, null, $req->ip, $req->userAgent);
         }
         $this->admins->setLastTotpStep((int)$admin['id'], $step);
-        $this->admins->recordLogin((int)$admin['id'], $req->ip, gmdate('Y-m-d H:i:s', $now));
-        $this->throttle->clear($req->ip, $email);
-        Audit::log($this->db, (int)$admin['id'], Audit::LOGIN_OK, null, $req->ip, $req->userAgent);
 
-        SuperAdminGuard::establish($session, (int)$admin['id'], $req->ip, $req->userAgent, $now);
-        $resp = Response::redirect('/monitoring');
-        $resp->regenerateSession = true;
-        return $resp;
+        return $this->completeLogin($session, $admin, $req, $now);
     }
 
     /** @param array<string,mixed> $session */
@@ -160,6 +180,28 @@ final class SuperAdminAuthController
         $session = [];
         $resp = Response::redirect('/login');
         $resp->destroySession = true;
+        return $resp;
+    }
+
+    /**
+     * Shared tail of both login paths: record the login, clear the throttle,
+     * write the audit entry, establish the session and go to /monitoring.
+     *
+     * @param array<string,mixed> $session
+     * @param array<string,mixed> $admin
+     */
+    private function completeLogin(array &$session, array $admin, Request $req, int $now): Response
+    {
+        $id    = (int)$admin['id'];
+        $email = (string)$admin['email'];
+
+        $this->admins->recordLogin($id, $req->ip, gmdate('Y-m-d H:i:s', $now));
+        $this->throttle->clear($req->ip, $email);
+        Audit::log($this->db, $id, Audit::LOGIN_OK, null, $req->ip, $req->userAgent);
+
+        SuperAdminGuard::establish($session, $id, $req->ip, $req->userAgent, $now);
+        $resp = Response::redirect('/monitoring');
+        $resp->regenerateSession = true;
         return $resp;
     }
 
@@ -194,6 +236,7 @@ final class SuperAdminAuthController
     {
         return Response::html(View::render('login', [
             'title' => 'Sign in', 'csrf' => Csrf::token($session), 'error' => $error, 'bare' => true,
+            'twoFactor' => Env::superAdminTwoFactorRequired(),
         ]), $status);
     }
 
