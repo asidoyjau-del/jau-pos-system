@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /** @var string|null $error @var string $csrf @var bool $enrolling @var string $secret @var string $secretGrouped @var string $otpauth */
 use ProCast\Support\View;
 $e = [View::class, 'e'];
@@ -18,7 +18,7 @@ $e = [View::class, 'e'];
       <div class="pa-login-icon">🔐</div>
       <div class="pa-login-title"><?= $e($title ?? 'Two-factor verification') ?></div>
       <div class="pa-login-sub">
-        <?php if ($enrolling): ?>Scan the QR code below with your authenticator app.<?php
+        <?php if ($enrolling): ?>Use your authenticator app to scan the QR code below.<?php
         else: ?>Enter the 6-digit code from your authenticator app.<?php endif; ?>
       </div>
     </div>
@@ -29,9 +29,15 @@ $e = [View::class, 'e'];
 
     <?php if ($enrolling && $secret !== ''): ?>
     <div class="qr-area">
-      <canvas id="qr-canvas" class="qr-canvas" width="160" height="160"></canvas>
-      <div class="secret-code"><?= $e($secretGrouped) ?></div>
-      <p class="text-muted" style="margin-top:8px;font-size:.72rem">Scan or enter the key above</p>
+      <p class="qr-step">① Open <strong>Google Authenticator</strong> or <strong>Authy</strong></p>
+      <p class="qr-step">② Tap <strong>+</strong> → <strong>Scan QR code</strong></p>
+      <div id="qr-box" class="qr-box"></div>
+      <a href="<?= $e($otpauth) ?>" id="qr-app-link" class="btn btn-ghost btn-sm qr-open-btn">📲 Open in authenticator app</a>
+      <details class="qr-manual" style="margin-top:12px">
+        <summary class="text-muted" style="cursor:pointer;font-size:.75rem">Can't scan? Enter key manually</summary>
+        <div class="secret-code" style="margin-top:8px"><?= $e($secretGrouped) ?></div>
+        <p class="text-muted" style="margin-top:6px;font-size:.72rem">Type this key into your authenticator app</p>
+      </details>
     </div>
     <input type="hidden" id="totp-otpauth" value="<?= $e($otpauth) ?>">
     <?php endif; ?>
@@ -54,7 +60,11 @@ $e = [View::class, 'e'];
     </p>
   </div>
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" integrity="sha512-CNgIRecGo7nphbeZ04Sc13ka07paqdeTu0WR1IM4kNcpmBAUSHSQX0FslNhTDadL4O5SANKe6drU1VRm/OB23g==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<!-- QR code library — bundled locally, NOT loaded from a CDN: (1) 2FA
+     enrollment must work on fully-offline installs, and (2) the platform's
+     Content-Security-Policy (script-src 'self') blocks third-party scripts
+     anyway. Source: qrcodejs 1.0.0 (davidshimjs), MIT licensed, unmodified. -->
+<script src="/platform-admin/assets/qrcode.min.js"></script>
 <script src="/platform-admin/assets/admin.js"></script>
 </body>
 </html>
