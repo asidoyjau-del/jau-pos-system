@@ -51,6 +51,25 @@ final class Env
             && trim((string)self::get('APP_ENV', '')) === 'production';
     }
 
+    /**
+     * Must the super admin clear a TOTP code after the password?
+     *
+     * Defaults to FALSE so the owner account configured in Render
+     * (SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD) signs in with email + password
+     * only and lands straight on /monitoring. Set SUPERADMIN_REQUIRE_2FA=true
+     * to switch the mandatory TOTP step back on.
+     */
+    public static function superAdminTwoFactorRequired(): bool
+    {
+        return trim((string)self::get('SUPERADMIN_REQUIRE_2FA', 'false')) === 'true';
+    }
+
+    /** The deployment owner account, i.e. SUPERADMIN_EMAIL from the environment. */
+    public static function superAdminEnvEmail(): string
+    {
+        return strtolower(trim((string)self::get('SUPERADMIN_EMAIL', '')));
+    }
+
     /** @return array<string,string> */
     private static function fileValues(): array
     {

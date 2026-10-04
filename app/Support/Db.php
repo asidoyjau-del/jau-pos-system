@@ -150,7 +150,9 @@ final class Db
             if ($existing === null) {
                 $repo->create($name, $email, Passwords::hash($password));
                 error_log("[platform-admin] Auto-seeded primary super admin account for {$email}.");
-            } else {
+            } elseif (!Passwords::verify($password, (string)$existing['password_hash']) || $existing['status'] !== 'active') {
+                // Only rewrite when the stored hash genuinely differs — Argon2id
+                // hashing is deliberately expensive, and this runs on every request.
                 $st = $pdo->prepare("UPDATE platform_super_admins SET password_hash = ?, status = 'active' WHERE email = ?");
                 $st->execute([Passwords::hash($password), $email]);
                 error_log("[platform-admin] Synchronized super admin password for {$email}.");
