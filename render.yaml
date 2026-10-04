@@ -20,3 +20,14 @@ services:
         value: Pos_System
       - key: SYNC_TOKEN
         value: procast_sync_key
+      # ── Platform Super Admin ────────────────────────────────────
+      - key: APP_ENV
+        value: production
+      - key: ENABLE_SUPER_ADMIN
+        value: "true"
+      - key: PLATFORM_CRYPTO_KEY
+        sync: false          # Set manually in Render dashboard — never commit
+      - key: PLATFORM_SESSION_PATH
+        value: /tmp/procast_super_sess
+      - key: PLATFORM_TIMEZONE
+        value: Asia/Manila

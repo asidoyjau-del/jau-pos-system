@@ -46,8 +46,16 @@ public class RawPrinterHelper {
     [DllImport("winspool.drv", EntryPoint = "WritePrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
     public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);
 
-    public static bool SendBytesToPrinter(string szPrinterName, byte[] pBytes) {
-        bool result = false;
+    // Stage reached by the last print job:
+    //   0 = failed (printer not found / cannot open)
+    //   1 = printer opened, job not yet created
+    //   2 = job created in Windows spooler (will print as soon as printer is reachable)
+    //   3 = bytes written
+    //   4 = job fully completed
+    public class JobState { public volatile int Stage = 0; }
+
+    public static int SendBytesToPrinterEx(string szPrinterName, byte[] pBytes, int timeoutMs) {
+        JobState st = new JobState();
         System.Threading.Thread t = new System.Threading.Thread(() => {
             IntPtr hPrinter = IntPtr.Zero;
             DOCINFOA di = new DOCINFOA();
@@ -55,16 +63,21 @@ public class RawPrinterHelper {
             di.pDataType = "RAW";
             try {
                 if (OpenPrinter(szPrinterName.Normalize(), out hPrinter, IntPtr.Zero)) {
+                    st.Stage = 1;
                     if (StartDocPrinter(hPrinter, 1, di)) {
+                        st.Stage = 2;
+                        bool written = false;
                         if (StartPagePrinter(hPrinter)) {
                             IntPtr pUnmanagedBytes = Marshal.AllocCoTaskMem(pBytes.Length);
                             Marshal.Copy(pBytes, 0, pUnmanagedBytes, pBytes.Length);
                             int dwWritten = 0;
-                            result = WritePrinter(hPrinter, pUnmanagedBytes, pBytes.Length, out dwWritten);
+                            written = WritePrinter(hPrinter, pUnmanagedBytes, pBytes.Length, out dwWritten);
                             Marshal.FreeCoTaskMem(pUnmanagedBytes);
+                            if (written) st.Stage = 3;
                             EndPagePrinter(hPrinter);
                         }
                         EndDocPrinter(hPrinter);
+                        if (written) st.Stage = 4;
                     }
                     ClosePrinter(hPrinter);
                 }
@@ -72,11 +85,15 @@ public class RawPrinterHelper {
         });
         t.IsBackground = true;
         t.Start();
-        if (!t.Join(1500)) {
-            try { t.Abort(); } catch {}
-            return false;
-        }
-        return result;
+        // Never Abort the thread: aborting mid-WritePrinter corrupts the spool job.
+        // If the USB printer is unplugged/offline the call may block, but once the
+        // job is in the spooler (Stage >= 2) Windows will print it on reconnect.
+        t.Join(timeoutMs);
+        return st.Stage;
+    }
+
+    public static bool SendBytesToPrinter(string szPrinterName, byte[] pBytes) {
+        return SendBytesToPrinterEx(szPrinterName, pBytes, 2500) >= 2;
     }
 }
 "@
@@ -99,33 +116,141 @@ $script:DRAWER_PULSE = [byte[]]@(
     0x07
 )
 
-# Helper to find target printer quickly without slow WMI queries
-function Get-TargetPrinterName {
-    param([string]$Preferred)
+# Keywords that identify a THERMAL receipt printer. We never fall back to the
+# Windows default printer, because sending raw ESC/POS bytes to an inkjet,
+# "Microsoft Print to PDF" (opens a Save dialog) or XPS writer causes garbage
+# pages or pop-ups. If no thermal printer is installed we use TEST MODE instead.
+$script:THERMAL_KEYWORDS = @(
+    'XP-58', 'XP-80', 'XP58', 'XP80', 'Xprinter', 'POS-58', 'POS-80', 'POS58', 'POS80',
+    'Thermal', 'Receipt', 'TM-T', 'TM-U', 'RP58', 'RP80', 'GP-58', 'GP-80', 'ZJ-58', 'ZJ-80',
+    'EPSON TM', 'Rongta', 'HPRT', 'Sewoo', 'Bixolon', 'SRP-', 'Star TSP', 'TSP1', 'Goojprt', 'MTP-'
+)
+
+# Returns installed printer names (fast; no WMI). Works on Windows 7/8/10/11.
+function Get-InstalledPrinterNames {
+    $names = @()
     try {
         Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-        $installed = [System.Drawing.Printing.PrinterSettings]::InstalledPrinters
-        if ($installed) {
-            foreach ($p in $installed) {
-                if ($p -like "*$Preferred*") { return $p }
-            }
-            $settings = New-Object System.Drawing.Printing.PrinterSettings
-            if ($settings.PrinterName) { return $settings.PrinterName }
-        }
+        foreach ($p in [System.Drawing.Printing.PrinterSettings]::InstalledPrinters) { $names += [string]$p }
     } catch {}
+    if ($names.Count -eq 0) {
+        try { $names = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) } catch {}
+    }
+    return $names
+}
 
+# Helper to find the thermal printer. Returns $null when none is installed.
+function Get-TargetPrinterName {
+    param([string]$Preferred)
+    $installed = Get-InstalledPrinterNames
+    if ($Preferred) {
+        foreach ($p in $installed) { if ($p -eq $Preferred) { return $p } }
+        foreach ($p in $installed) { if ($p -like "*$Preferred*") { return $p } }
+    }
+    foreach ($kw in $script:THERMAL_KEYWORDS) {
+        foreach ($p in $installed) { if ($p -like "*$kw*") { return $p } }
+    }
+    return $null
+}
+
+# Best-effort check whether the (USB) printer is physically reachable.
+# Windows marks unplugged USB printers as "WorkOffline".
+function Test-PrinterOnline {
+    param([string]$Name)
+    if (-not $Name) { return $false }
     try {
-        $pList = Get-Printer -ErrorAction SilentlyContinue
-        if ($pList) {
-            $match = $pList | Where-Object { $_.Name -like "*$Preferred*" } | Select-Object -First 1
-            if ($match) { return $match.Name }
-            $def = $pList | Where-Object { $_.Default -eq $true } | Select-Object -First 1
-            if ($def) { return $def.Name }
-            return $pList[0].Name
+        $safe = $Name.Replace("\", "\\").Replace("'", "\'")
+        $wp = $null
+        if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+            $wp = Get-CimInstance -ClassName Win32_Printer -Filter "Name='$safe'" -ErrorAction SilentlyContinue
+        } else {
+            $wp = Get-WmiObject -Class Win32_Printer -Filter "Name='$safe'" -ErrorAction SilentlyContinue
         }
-    } catch {}
+        if (-not $wp) { return $false }
+        if ($wp.WorkOffline) { return $false }
+        # 7 = Offline per Win32_Printer.PrinterStatus
+        if ($wp.PrinterStatus -eq 7) { return $false }
+        return $true
+    } catch { return $true }
+}
 
-    return "Xprinter XP-58"
+# Converts ESC/POS bytes into readable text for TEST MODE previews.
+function Convert-EscPosToText {
+    param([byte[]]$Bytes)
+    $sb = New-Object System.Text.StringBuilder
+    $enc = [System.Text.Encoding]::GetEncoding("ISO-8859-1")
+    $i = 0
+    $n = $Bytes.Length
+    while ($i -lt $n) {
+        $c = $Bytes[$i]
+        if ($c -eq 0x1B) {
+            $next = if ($i + 1 -lt $n) { $Bytes[$i + 1] } else { 0 }
+            if ($next -eq 0x40) { $i += 2 } elseif ($next -eq 0x70) { $i += 5 } else { $i += 3 }
+            continue
+        }
+        if ($c -eq 0x1D) {
+            $next = if ($i + 1 -lt $n) { $Bytes[$i + 1] } else { 0 }
+            if ($next -eq 0x56) { $i += 4; [void]$sb.Append("`n------------ CUT -------------`n"); continue }
+            if ($next -eq 0x6B -and ($i + 3) -lt $n) {
+                $len = [int]$Bytes[$i + 3]
+                $dataLen = [Math]::Max(0, [Math]::Min($len - 2, $n - ($i + 6)))
+                $code = if ($dataLen -gt 0) { $enc.GetString($Bytes, $i + 6, $dataLen) } else { '' }
+                [void]$sb.Append("||||| BARCODE: $code |||||")
+                $i += 4 + $len
+                continue
+            }
+            $i += 3
+            continue
+        }
+        if ($c -eq 0x10) { $i += 5; continue }
+        if ($c -eq 0x07) { $i += 1; continue }
+        [void]$sb.Append([char]$c)
+        $i++
+    }
+    return $sb.ToString()
+}
+
+# TEST MODE: no thermal printer installed -> save a text preview instead of
+# failing, so checkout can be tested on any laptop with zero dialogs.
+function Save-ReceiptPreview {
+    param([byte[]]$Bytes, [string]$Kind, [string]$Ref)
+    try {
+        $dir = Join-Path $PSScriptRoot 'receipt-previews'
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $safeRef = if ($Ref) { ($Ref -replace '[^A-Za-z0-9_-]', '') } else { '' }
+        $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+        $file = Join-Path $dir ("{0}_{1}{2}.txt" -f $stamp, $Kind, $(if ($safeRef) { "_$safeRef" } else { '' }))
+        $text = Convert-EscPosToText -Bytes $Bytes
+        [System.IO.File]::WriteAllText($file, $text, [System.Text.Encoding]::UTF8)
+        # Keep only the latest 200 previews
+        Get-ChildItem $dir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -Skip 200 | Remove-Item -Force -ErrorAction SilentlyContinue
+        return $file
+    } catch { return $null }
+}
+
+# Sends bytes to the thermal printer, or saves a preview in TEST MODE.
+# Returns a hashtable: success, mode (printed|queued|simulated|failed), printer, preview_file
+function Send-PosJob {
+    param([byte[]]$Bytes, [string]$Kind, [string]$Ref)
+    $target = Get-TargetPrinterName -Preferred $PrinterName
+    $script:actualPrinter = $target
+    if (-not $target) {
+        $file = Save-ReceiptPreview -Bytes $Bytes -Kind $Kind -Ref $Ref
+        Write-Host "[TEST MODE] No thermal printer installed - preview saved: $file" -ForegroundColor Magenta
+        return @{ success = $true; mode = 'simulated'; printer = $null; preview_file = $file }
+    }
+    $stage = [RawPrinterHelper]::SendBytesToPrinterEx($target, $Bytes, 2500)
+    if ($stage -ge 4) { return @{ success = $true; mode = 'printed'; printer = $target } }
+    # Stage 1 = printer opened but StartDocPrinter is still blocking (USB unplugged);
+    # Windows still queues the job, so it is not a real failure.
+    if ($stage -ge 1) {
+        Write-Host "[QUEUED] Job is in the Windows spooler for $target (printer offline/unplugged?)" -ForegroundColor Yellow
+        return @{ success = $true; mode = 'queued'; printer = $target }
+    }
+    # Could not even open the printer (driver removed / spooler stopped): save preview so nothing is lost
+    $file = Save-ReceiptPreview -Bytes $Bytes -Kind $Kind -Ref $Ref
+    Write-Host "[FAILED] Could not open printer $target (stage $stage). Preview saved: $file" -ForegroundColor Red
+    return @{ success = $false; mode = 'failed'; printer = $target; preview_file = $file }
 }
 
 # Helper to format a 2-column receipt line (e.g. "SUBTOTAL:" and "P25.00") with exact 32-character width
@@ -497,11 +622,123 @@ function New-EscPosShiftSummary {
 }
 Set-Alias -Name Build-EscPosShiftSummary -Value New-EscPosShiftSummary
 
+# Helper to build ESC/POS binary data for a Void Receipt slip
+function New-EscPosVoidReceipt {
+    param([PSCustomObject]$data)
+
+    $ms = New-Object System.IO.MemoryStream
+    $bw = New-Object System.IO.BinaryWriter($ms)
+    $enc = [System.Text.Encoding]::GetEncoding("ISO-8859-1")
+
+    # Initialize printer
+    $bw.Write([byte[]]@(0x1B, 0x40))
+
+    # Header (Centered)
+    $bw.Write([byte[]]@(0x1B, 0x61, 0x01)) # Center
+    $bw.Write([byte[]]@(0x1B, 0x45, 0x01)) # Bold on
+    $bw.Write([byte[]]@(0x1D, 0x21, 0x11)) # Double size
+    $shopName = if ($data.shop_name) { $data.shop_name } else { "RE M STORE" }
+    $bw.Write($enc.GetBytes("$shopName`n"))
+    $bw.Write([byte[]]@(0x1D, 0x21, 0x00)) # Normal size
+    $bw.Write([byte[]]@(0x1B, 0x45, 0x00)) # Bold off
+
+    if ($data.shop_address) { $bw.Write($enc.GetBytes("$($data.shop_address)`n")) }
+    if ($data.shop_tin)     { $bw.Write($enc.GetBytes("TIN: $($data.shop_tin)`n")) }
+
+    $bw.Write($enc.GetBytes("--------------------------------`n"))
+    $bw.Write([byte[]]@(0x1B, 0x45, 0x01))
+    $isFullVoid = $data.is_full_void -eq $true
+    $header = if ($isFullVoid) { "** VOID RECEIPT - ORDER VOIDED **" } else { "** VOID RECEIPT - ITEM(S) VOIDED **" }
+    $bw.Write($enc.GetBytes("$header`n"))
+    $bw.Write([byte[]]@(0x1B, 0x45, 0x00))
+    $bw.Write($enc.GetBytes("--------------------------------`n"))
+
+    # Left align
+    $bw.Write([byte[]]@(0x1B, 0x61, 0x00))
+    $bw.Write($enc.GetBytes("OR#:     $($data.order_ref)`n"))
+    $bw.Write($enc.GetBytes("CASHIER: $($data.cashier)`n"))
+    $bw.Write($enc.GetBytes("DATE:    $($data.date_time)`n"))
+    if ($data.reason) { $bw.Write($enc.GetBytes("REASON:  $($data.reason)`n")) }
+    $bw.Write($enc.GetBytes("--------------------------------`n"))
+    $bw.Write($enc.GetBytes("QTY  ITEM DESCRIPTION   PRICE    TOTAL`n"))
+    $bw.Write($enc.GetBytes("--------------------------------`n"))
+
+    $toNum = {
+        param($v)
+        if ($null -eq $v -or "$v".Trim() -eq "") { return 0.0 }
+        $d = 0.0
+        if ([double]::TryParse("$v", [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+        return 0.0
+    }
+
+    if ($data.items) {
+        foreach ($it in $data.items) {
+            $qty       = [int](& $toNum $it.quantity)
+            $voidedQty = [int](& $toNum $it.voided_qty)
+            $remaining = $qty - $voidedQty
+            $price     = & $toNum $it.price
+            $priceFmt  = [string]::Format("{0:N2}", $price)
+
+            if ($remaining -gt 0) {
+                $name = if ($it.product_name) { $it.product_name } else { "Item" }
+                if ($name.Length -gt 14) { $name = $name.Substring(0, 14) }
+                $tot = [string]::Format("{0:N2}", ($remaining * $price))
+                $line = "{0,-4} {1,-14} {2,6} {3,6}`n" -f "$remaining x", $name, $priceFmt, $tot
+                $bw.Write($enc.GetBytes($line))
+            }
+            if ($voidedQty -gt 0) {
+                $name = if ($it.product_name) { $it.product_name } else { "Item" }
+                if ($name.Length -gt 10) { $name = $name.Substring(0, 10) }
+                $tot = [string]::Format("{0:N2}", ($voidedQty * $price))
+                $line = "{0,-4} {1,-10}VOID {2,6} {3,6}`n" -f "$voidedQty x", $name, $priceFmt, $tot
+                $bw.Write($enc.GetBytes($line))
+            }
+        }
+    }
+
+    $bw.Write($enc.GetBytes("--------------------------------`n"))
+
+    $cur = if ($data.currency) { $data.currency } else { "P" }
+    $voidedAmt = & $toNum $data.voided_amount
+    $netTotal  = & $toNum $data.net_total
+
+    $bw.Write([byte[]]@(0x1B, 0x45, 0x01)) # Bold
+    $bw.Write($enc.GetBytes((Format-ReceiptLine "VOIDED / REFUNDED:" ([string]::Format("-{0}{1:N2}", $cur, $voidedAmt)))))
+    $bw.Write([byte[]]@(0x1D, 0x21, 0x01)) # Double height
+    $label = if ($isFullVoid) { "NEW TOTAL:" } else { "UPDATED TOTAL:" }
+    $bw.Write($enc.GetBytes((Format-ReceiptLine $label ([string]::Format("{0}{1:N2}", $cur, $netTotal)) 32)))
+    $bw.Write([byte[]]@(0x1D, 0x21, 0x00))
+    $bw.Write([byte[]]@(0x1B, 0x45, 0x00))
+    $bw.Write($enc.GetBytes("--------------------------------`n"))
+
+    # Signature lines
+    $bw.Write([byte[]]@(0x1B, 0x61, 0x01)) # Center
+    $bw.Write($enc.GetBytes("Customer Signature:`n`n"))
+    $bw.Write($enc.GetBytes("________________________________`n`n"))
+    $bw.Write($enc.GetBytes("Manager / Owner Authorization:`n`n"))
+    $bw.Write($enc.GetBytes("________________________________`n`n"))
+    $bw.Write($enc.GetBytes("TRANSACTION VOID AUDIT SLIP`n"))
+    $bw.Write($enc.GetBytes("Please keep receipt for audit.`n`n"))
+
+    # Feed and cut
+    $bw.Write([byte[]]@(0x1B, 0x64, 4))
+    $bw.Write([byte[]]@(0x1D, 0x56, 66, 0))
+
+    $bw.Flush()
+    $result = $ms.ToArray()
+    $bw.Close()
+    $ms.Close()
+    return $result
+}
+Set-Alias -Name Build-EscPosVoidReceipt -Value New-EscPosVoidReceipt
+
 
 # Start HTTP Listener
 $listener = New-Object System.Net.HttpListener
 $prefix = "http://127.0.0.1:$Port/"
 $listener.Prefixes.Add($prefix)
+# Also answer on http://localhost (some browsers resolve it to ::1 first)
+try { $listener.Prefixes.Add("http://localhost:$Port/") } catch {}
 
 try {
     $listener.Start()
@@ -510,12 +747,24 @@ try {
     Write-Host " Direct silent printing to $PrinterName" -ForegroundColor Yellow
     Write-Host "============================================================" -ForegroundColor Cyan
 } catch {
-    Write-Host "ERROR: Could not start listener on port $Port : $_" -ForegroundColor Red
-    exit 1
+    # Retry with only 127.0.0.1 (the localhost prefix can need URL ACL on some PCs)
+    try {
+        $listener = New-Object System.Net.HttpListener
+        $listener.Prefixes.Add($prefix)
+        $listener.Start()
+        Write-Host " POS Native Print Agent Running on $prefix" -ForegroundColor Green
+    } catch {
+        Write-Host "ERROR: Could not start listener on port $Port : $_" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $script:actualPrinter = Get-TargetPrinterName -Preferred $PrinterName
-Write-Host "Target Printer: $script:actualPrinter" -ForegroundColor Green
+if ($script:actualPrinter) {
+    Write-Host "Target Printer: $script:actualPrinter" -ForegroundColor Green
+} else {
+    Write-Host "No thermal printer installed -> TEST MODE (receipts saved to .\receipt-previews)" -ForegroundColor Magenta
+}
 
 while ($listener.IsListening) {
     $context = $null
@@ -541,9 +790,12 @@ while ($listener.IsListening) {
         }
 
         if ($req.Url.AbsolutePath -eq "/status") {
+            $script:actualPrinter = Get-TargetPrinterName -Preferred $PrinterName
             $statusObj = @{
                 status = "online"
                 printer = $script:actualPrinter
+                printer_online = (Test-PrinterOnline -Name $script:actualPrinter)
+                test_mode = (-not $script:actualPrinter)
                 time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             }
             $json = ConvertTo-Json $statusObj
@@ -564,12 +816,20 @@ while ($listener.IsListening) {
                     $reader.Close()
                 }
             } catch {}
-            $target = $script:actualPrinter
-            $printSuccess = [RawPrinterHelper]::SendBytesToPrinter($target, $script:DRAWER_PULSE)
-            Write-Host "[DRAWER] Cash drawer kick pulse sent -> Printer: $target (Success: $printSuccess)" -ForegroundColor Cyan
+            $target = Get-TargetPrinterName -Preferred $PrinterName
+            $script:actualPrinter = $target
+            $mode = 'simulated'
+            $printSuccess = $true
+            if ($target) {
+                $stage = [RawPrinterHelper]::SendBytesToPrinterEx($target, $script:DRAWER_PULSE, 1500)
+                $printSuccess = ($stage -ge 1)
+                $mode = if ($stage -ge 4) { 'printed' } elseif ($stage -ge 1) { 'queued' } else { 'failed' }
+            }
+            Write-Host "[DRAWER] Cash drawer kick pulse -> Printer: $target (Mode: $mode)" -ForegroundColor Cyan
             $respObj = @{
                 success = $printSuccess
                 printer = $target
+                mode = $mode
                 action = "drawer_kick"
             }
             $json = ConvertTo-Json $respObj
@@ -587,27 +847,34 @@ while ($listener.IsListening) {
             $reader.Close()
 
             $data = ConvertFrom-Json $body
-            $target = $script:actualPrinter
+            # Peso sign is not in the printer code page -> print as "P"
+            if ($data.currency -and "$($data.currency)" -eq [string][char]0x20B1) { $data.currency = 'P' }
 
             $printType = if ($data.type) { "$($data.type)" } else { "sale" }
+            $jobRef = if ($data.ref) { "$($data.ref)" } elseif ($data.order_ref) { "$($data.order_ref)" } else { '' }
             if ($printType -eq "shift_start") {
-                Write-Host "[PRINT] Shift Start / Cash Float Slip -> Printer: $target" -ForegroundColor Green
+                Write-Host "[PRINT] Shift Start / Cash Float Slip" -ForegroundColor Green
                 $escPosBytes = New-EscPosShiftStart -data $data
             } elseif ($printType -eq "shift_summary" -or $printType -eq "z_read") {
-                Write-Host "[PRINT] Shift Summary / Z-Reading -> Printer: $target" -ForegroundColor Green
+                Write-Host "[PRINT] Shift Summary / Z-Reading" -ForegroundColor Green
                 $escPosBytes = New-EscPosShiftSummary -data $data
+            } elseif ($printType -eq "void_receipt") {
+                Write-Host "[PRINT] Void Receipt (Ref: $jobRef)" -ForegroundColor Yellow
+                $escPosBytes = New-EscPosVoidReceipt -data $data
             } else {
-                Write-Host "[PRINT] Order receipt print request: $($data.ref) -> Printer: $target" -ForegroundColor Green
+                Write-Host "[PRINT] Sale receipt (Ref: $jobRef)" -ForegroundColor Green
                 $escPosBytes = New-EscPosReceipt -data $data
             }
 
-            $printSuccess = [RawPrinterHelper]::SendBytesToPrinter($target, $escPosBytes)
+            $job = Send-PosJob -Bytes $escPosBytes -Kind $printType -Ref $jobRef
 
             $respObj = @{
-                success = $printSuccess
-                printer = $target
+                success = $job.success
+                mode = $job.mode
+                printer = $job.printer
+                preview_file = $job.preview_file
                 type = $printType
-                order_ref = $data.ref
+                order_ref = $jobRef
             }
             $json = ConvertTo-Json $respObj
             $buf = [System.Text.Encoding]::UTF8.GetBytes($json)

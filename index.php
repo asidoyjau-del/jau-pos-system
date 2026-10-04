@@ -4568,7 +4568,9 @@ if (isset($_GET['api'])) {
                         $voidLogStmt->execute([$uid, $recentShift['login_time'], $recentShift['logout_time']]);
                         $shiftVoids = $voidLogStmt->fetchAll();
 
-                        $txStmt = $db->prepare("SELECT order_ref, total, cash, change, created_at FROM transactions WHERE user_id=? AND created_at>=? AND created_at<=? ORDER BY created_at ASC");
+                        $dbDrv = $db->getAttribute(PDO::ATTR_DRIVER_NAME);
+                        $chgCol = ($dbDrv === 'mysql') ? '`change`' : '"change"';
+                        $txStmt = $db->prepare("SELECT order_ref, total, cash, {$chgCol}, created_at FROM transactions WHERE user_id=? AND created_at>=? AND created_at<=? ORDER BY created_at ASC");
                         $txStmt->execute([$uid, $recentShift['login_time'], $recentShift['logout_time']]);
                         $shiftTx = $txStmt->fetchAll();
 
@@ -4629,7 +4631,9 @@ if (isset($_GET['api'])) {
                 // ── Transaction detail for the printed end-of-shift receipt ──
                 // (added so the closing receipt shows what was actually SOLD this
                 // shift, not just the cash count — like a 7-Eleven Z-read tape)
-                $txStmt = $db->prepare("SELECT order_ref, total, cash, change, created_at
+                $dbDrv2 = $db->getAttribute(PDO::ATTR_DRIVER_NAME);
+                $chgCol2 = ($dbDrv2 === 'mysql') ? '`change`' : '"change"';
+                $txStmt = $db->prepare("SELECT order_ref, total, cash, {$chgCol2}, created_at
             FROM transactions WHERE user_id=? AND created_at>=? ORDER BY created_at ASC");
                 $txStmt->execute([$uid, $row['login_time']]);
                 $shiftTx = $txStmt->fetchAll();
