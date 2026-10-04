@@ -1,4 +1,4 @@
-﻿/* ProCast Platform Admin — admin.js */
+/* ProCast Platform Admin — admin.js */
 'use strict';
 
 /* ── CSRF helper ──────────────────────────────────────────────── */
@@ -197,19 +197,31 @@ function initStoreSearch() {
 
 /* ── TOTP QR code (enrollment flow) ─────────────────────────── */
 function initTotpQr() {
-  const canvas = document.getElementById('qr-canvas');
-  const uri    = document.getElementById('totp-otpauth')?.value;
-  if (!canvas || !uri) return;
-  // Minimal QR via the browser's built-in QR-code API if available,
-  // else show a link the user can tap on their phone.
+  const box = document.getElementById('qr-box');
+  const uri = document.getElementById('totp-otpauth')?.value;
+  if (!box || !uri) return;
+
   if (typeof QRCode !== 'undefined') {
-    new QRCode(canvas, { text: uri, width: 160, height: 160, colorDark:'#fff', colorLight:'#111827' });
+    new QRCode(box, {
+      text: uri,
+      width: 180,
+      height: 180,
+      colorDark: '#000000',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M,
+    });
+    // Style the generated image
+    setTimeout(() => {
+      const img = box.querySelector('img');
+      if (img) {
+        img.style.borderRadius = '8px';
+        img.style.display = 'block';
+        img.style.margin = '0 auto';
+      }
+    }, 50);
   } else {
-    const a = document.createElement('a');
-    a.href = uri;
-    a.textContent = 'Open in authenticator app';
-    a.className = 'btn btn-ghost btn-sm';
-    canvas.replaceWith(a);
+    // Fallback: show open-in-app link prominently
+    box.innerHTML = '<p style="padding:20px;color:var(--text-3);font-size:.8rem">QR code could not load.<br>Use the button below instead.</p>';
   }
 }
 
