@@ -32,12 +32,15 @@ $e = [View::class, 'e'];
       <p class="qr-step">① Open <strong>Google Authenticator</strong> or <strong>Authy</strong></p>
       <p class="qr-step">② Tap <strong>+</strong> → <strong>Scan QR code</strong></p>
       <div id="qr-box" class="qr-box"></div>
+      <div class="qr-manual">
+        <p class="qr-manual-label">Can't scan? Add this key manually:</p>
+        <div class="secret-row">
+          <code id="totp-secret" class="secret-code"><?= $e($secretGrouped) ?></code>
+          <button type="button" id="btn-copy-secret" class="btn btn-ghost btn-sm copy-btn">📋 Copy</button>
+        </div>
+        <p class="text-muted" style="margin-top:8px;font-size:.72rem">In the app: <strong>+</strong> → <strong>Enter a setup key</strong> — then paste the key.</p>
+      </div>
       <a href="<?= $e($otpauth) ?>" id="qr-app-link" class="btn btn-ghost btn-sm qr-open-btn">📲 Open in authenticator app</a>
-      <details class="qr-manual" style="margin-top:12px">
-        <summary class="text-muted" style="cursor:pointer;font-size:.75rem">Can't scan? Enter key manually</summary>
-        <div class="secret-code" style="margin-top:8px"><?= $e($secretGrouped) ?></div>
-        <p class="text-muted" style="margin-top:6px;font-size:.72rem">Type this key into your authenticator app</p>
-      </details>
     </div>
     <input type="hidden" id="totp-otpauth" value="<?= $e($otpauth) ?>">
     <?php endif; ?>
