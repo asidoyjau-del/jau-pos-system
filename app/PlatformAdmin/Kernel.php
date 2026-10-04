@@ -183,6 +183,7 @@ final class Kernel
             'csrf'  => \ProCast\Support\Csrf::token($session),
             'error' => null,
             'bare'  => true,
+            'twoFactor' => \ProCast\Support\Env::superAdminTwoFactorRequired(),
         ]), 200);
     }
 
