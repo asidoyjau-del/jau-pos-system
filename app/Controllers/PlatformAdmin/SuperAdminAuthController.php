@@ -10,6 +10,8 @@ use ProCast\Support\Audit;
 use ProCast\Support\AuthThrottle;
 use ProCast\Support\Crypto;
 use ProCast\Support\Csrf;
+use ProCast\Support\Db;
+use ProCast\Support\Env;
 use ProCast\Support\Request;
 use ProCast\Support\Response;
 use ProCast\Support\Totp;
