@@ -11,10 +11,14 @@ WORKDIR /var/www/html
 COPY . /var/www/html/
 
 RUN mkdir -p /var/www/html/uploads/products \
-    && chown -R www-data:www-data /var/www/html/uploads
+    && mkdir -p /var/www/html/uploads/verification \
+    && mkdir -p /tmp/procast_super_sess \
+    && chown -R www-data:www-data /var/www/html/uploads /tmp/procast_super_sess
 
 EXPOSE 80
 
 # Render supplies PORT at runtime (normally 10000). Apache must listen on
 # that port for Render's health checks and proxy to reach the container.
-CMD ["sh", "-c", "PORT=\"${PORT:-10000}\"; sed -i \"s/^Listen 80$/Listen ${PORT}/\" /etc/apache2/ports.conf; sed -i \"s#<VirtualHost \\*:80>#<VirtualHost *:${PORT}>\\n<Directory /var/www/html>\\nAllowOverride All\\n</Directory>#\" /etc/apache2/sites-available/000-default.conf; exec apache2-foreground"]
+# AllowOverride All is set for the entire /var/www/html tree so that
+# platform-admin/.htaccess (and root .htaccess) are both honoured.
+CMD ["sh", "-c", "PORT=\"${PORT:-10000}\"; sed -i \"s/^Listen 80$/Listen ${PORT}/\" /etc/apache2/ports.conf; sed -i \"s#<VirtualHost \\*:80>#<VirtualHost *:${PORT}>\\n<Directory /var/www/html>\\nAllowOverride All\\nRequire all granted\\n</Directory>#\" /etc/apache2/sites-available/000-default.conf; exec apache2-foreground"]
