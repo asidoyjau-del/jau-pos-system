@@ -16,6 +16,10 @@ Options -Indexes
     # Block sensitive extensions (backups, sql dumps, logs, scripts)
     RewriteRule \.(bak|backup|sql|log|ini|conf|sh|bat|ps1|vbs|lock|md)$ - [F,L]
 
+    # Platform Admin routing
+    RewriteRule ^platform-admin/index\.php$ - [L]
+    RewriteRule ^platform-admin(/.*)?$ platform-admin/index.php [QSA,L]
+
     # PWA & Asset routing to index.php if physical file does not exist
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
