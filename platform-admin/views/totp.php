@@ -15,7 +15,7 @@ $e = [View::class, 'e'];
 <div class="pa-login-wrap">
   <div class="pa-login-box">
     <div class="pa-login-logo">
-      <div class="pa-login-icon">🔐</div>
+      <div class="pa-login-icon"></div>
       <div class="pa-login-title"><?= $e($title ?? 'Two-factor verification') ?></div>
       <div class="pa-login-sub">
         <?php if ($enrolling): ?>Use your authenticator app to scan the QR code below.<?php
@@ -24,7 +24,7 @@ $e = [View::class, 'e'];
     </div>
 
     <?php if ($error): ?>
-    <div class="alert alert-error" role="alert">⚠️ <?= $e($error) ?></div>
+    <div class="alert alert-error" role="alert"> <?= $e($error) ?></div>
     <?php endif; ?>
 
     <?php if ($enrolling && $secret !== ''): ?>
@@ -36,11 +36,11 @@ $e = [View::class, 'e'];
         <p class="qr-manual-label">Can't scan? Add this key manually:</p>
         <div class="secret-row">
           <code id="totp-secret" class="secret-code"><?= $e($secretGrouped) ?></code>
-          <button type="button" id="btn-copy-secret" class="btn btn-ghost btn-sm copy-btn">📋 Copy</button>
+          <button type="button" id="btn-copy-secret" class="btn btn-ghost btn-sm copy-btn"> Copy</button>
         </div>
         <p class="text-muted" style="margin-top:8px;font-size:.72rem">In the app: <strong>+</strong> → <strong>Enter a setup key</strong> — then paste the key.</p>
       </div>
-      <a href="<?= $e($otpauth) ?>" id="qr-app-link" class="btn btn-ghost btn-sm qr-open-btn">📲 Open in authenticator app</a>
+      <a href="<?= $e($otpauth) ?>" id="qr-app-link" class="btn btn-ghost btn-sm qr-open-btn"> Open in authenticator app</a>
     </div>
     <input type="hidden" id="totp-otpauth" value="<?= $e($otpauth) ?>">
     <?php endif; ?>

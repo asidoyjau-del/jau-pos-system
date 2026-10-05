@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /** @var array $counts @var int $sessions @var array $volume @var string $csrf @var array $admin */
 use ProCast\Support\View;
 $e  = [View::class, 'e'];
@@ -41,7 +41,7 @@ $fn = fn($n) => number_format($n, 2);
 <div class="grid-2 mb-6">
   <div class="pa-card">
     <div class="pa-card-header">
-      <span class="pa-card-title">📈 Today&apos;s Volume</span>
+      <span class="pa-card-title"> Today&apos;s Volume</span>
     </div>
     <div class="pa-card-body">
       <div style="font-size:1.9rem;font-weight:800;color:var(--emerald)" id="stat-today-total">₱<?= $fn($volume['today']['total']) ?></div>
@@ -50,7 +50,7 @@ $fn = fn($n) => number_format($n, 2);
   </div>
   <div class="pa-card">
     <div class="pa-card-header">
-      <span class="pa-card-title">📅 This Month</span>
+      <span class="pa-card-title"> This Month</span>
     </div>
     <div class="pa-card-body">
       <div style="font-size:1.9rem;font-weight:800;color:var(--accent-h)" id="stat-month-total">₱<?= $fn($volume['month']['total']) ?></div>
@@ -62,7 +62,7 @@ $fn = fn($n) => number_format($n, 2);
 <!-- Health widget -->
 <div class="pa-card mb-6">
   <div class="pa-card-header">
-    <span class="pa-card-title">🤖 External Services</span>
+    <span class="pa-card-title"> External Services</span>
   </div>
   <div class="pa-card-body">
     <div class="health-widget">
@@ -78,17 +78,17 @@ $fn = fn($n) => number_format($n, 2);
 <!-- Quick links -->
 <div class="pa-card">
   <div class="pa-card-header">
-    <span class="pa-card-title">🏃 Quick actions</span>
+    <span class="pa-card-title"> Quick actions</span>
   </div>
   <div class="pa-card-body flex gap-3" style="flex-wrap:wrap">
     <a href="/platform-admin/stores?status=pending_approval" class="btn btn-amber">
-      📋 Review Pending (<?= $e($counts['pending_approval']) ?>)
+       Review Pending (<?= $e($counts['pending_approval']) ?>)
     </a>
     <a href="/platform-admin/stores?status=active" class="btn btn-emerald">
-      ✅ All Active Stores
+       All Active Stores
     </a>
     <a href="/platform-admin/users" class="btn btn-ghost">
-      🔍 User Inspector
+       User Inspector
     </a>
   </div>
 </div>

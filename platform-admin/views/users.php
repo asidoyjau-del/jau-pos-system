@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /** @var list<array<string,mixed>> $rows @var string $q @var int $now @var string $csrf */
 use ProCast\Support\View;
 $e = [View::class, 'e'];
@@ -9,7 +9,7 @@ $storeColors = ['active' => 'badge-active', 'suspended' => 'badge-suspended', 'p
     <span class="pa-card-title">User Activity Inspector</span>
     <form method="GET" action="/platform-admin/users" id="user-search-form" style="display:flex;gap:8px;align-items:center">
       <div class="pa-search-wrap">
-        <span class="pa-search-icon">🔍</span>
+        <span class="pa-search-icon"><?= $e(View::icon('search')) ?></span>
         <input type="text" name="q" class="form-control" value="<?= $e($q) ?>"
                placeholder="Search username, name, email, store…"
                autocomplete="off" style="width:280px">
@@ -21,12 +21,12 @@ $storeColors = ['active' => 'badge-active', 'suspended' => 'badge-suspended', 'p
     <table class="pa-table">
       <thead>
         <tr>
-          <th>User</th><th>Role</th><th>Store</th><th>Store Status</th><th>Last Login</th><th>Active Tokens</th>
+          <th>User</th><th>Role</th><th>Store</th><th>Client</th><th>Store Status</th><th>Last Login</th><th>Active Tokens</th>
         </tr>
       </thead>
       <tbody>
       <?php if (empty($rows)): ?>
-        <tr><td colspan="6" class="text-muted" style="text-align:center;padding:32px">No users found. Use the search box above.</td></tr>
+        <tr><td colspan="7" class="text-muted" style="text-align:center;padding:32px">No users found. Use the search box above.</td></tr>
       <?php else: foreach ($rows as $u): ?>
         <?php
           $lastLogin  = $u['last_login'] ?? null;
@@ -43,13 +43,21 @@ $storeColors = ['active' => 'badge-active', 'suspended' => 'badge-suspended', 'p
             <div class="text-muted" style="font-size:.72rem"><?= $e($u['email']) ?></div>
             <?php endif; ?>
           </td>
-          <td class="text-muted"><?= $e($u['role'] ?? '—') ?></td>
+          <td class="text-muted"><?= $e($u['role'] ?? '') ?></td>
           <td>
             <?php if (!empty($u['store_name'])): ?>
-            <a href="/platform-admin/stores/<?= $e($u['store_id']) ?>"><?= $e($u['store_name']) ?></a>
+            <a href="/platform-admin/stores/<?= $e($u['store_id']) ?>"><?= $e($u['display_store_name'] ?: $u['store_name']) ?></a>
             <?php else: ?>
-            <span class="text-muted">—</span>
+            <span class="text-muted">&mdash;</span>
             <?php endif; ?>
+          </td>
+          <td>
+            <?php
+              $ct      = (string)($u['client_type'] ?? 'web');
+              $ctLabel = ['web' => 'Web', 'app' => 'App', 'local' => 'Local POS'][$ct] ?? 'Web';
+              $ctClass = $ct === 'app' ? 'app' : ($ct === 'local' ? 'local' : '');
+            ?>
+            <span class="badge-client <?= $e($ctClass) ?>"><?= $e($ctLabel) ?></span>
           </td>
           <td>
             <?php if (!empty($u['store_status'])): ?>

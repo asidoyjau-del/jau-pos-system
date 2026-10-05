@@ -1,33 +1,48 @@
-/* ProCast Platform Admin — Executive Dark Theme */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* ProCast Platform Admin â€” shares the POS brand: same fonts (Inter + Poppins),
+   same navy/blue palette, same hero background image. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@600;700;800&display=swap');
 
 :root {
-  --bg-base:    #0b0f1a;
-  --bg-card:    #111827;
-  --bg-card2:   #1a2236;
-  --bg-sidebar: #0d1221;
-  --border:     rgba(99,120,180,.18);
-  --text-1:     #f0f4ff;
-  --text-2:     #94a3b8;
-  --text-3:     #5a6a85;
-  --accent:     #6366f1;
-  --accent-h:   #818cf8;
-  --accent-d:   #4f46e5;
-  --amber:      #f59e0b;
-  --emerald:    #10b981;
-  --rose:       #f43f5e;
-  --violet:     #8b5cf6;
+  /* Palette lifted from the POS :root in index.php so the admin portal and the
+     product read as one application rather than two. */
+  --bg-base:    #0a1628;
+  --bg-card:    #101f38;
+  --bg-card2:   #16294a;
+  --bg-sidebar: #0c1930;
+  --border:     #23385c;
+  --text-1:     #eaf2ff;
+  --text-2:     #a8bdd6;
+  --text-3:     #6f89ab;
+  --accent:     #2f7ff5;
+  --accent-h:   #4da3ff;
+  --accent-d:   #1f66d0;
+  --amber:      #f4a024;
+  --emerald:    #3ba55c;
+  --rose:       #e5484d;
+  --violet:     #7c5cff;
   --radius-sm:  8px;
   --radius:     12px;
   --radius-lg:  18px;
-  --shadow-card: 0 4px 24px rgba(0,0,0,.5);
-  --shadow-glow: 0 0 0 3px rgba(99,102,241,.28);
+  --shadow-card: 0 4px 24px rgba(0,0,0,.45);
+  --shadow-glow: 0 0 0 3px rgba(47,127,245,.28);
   --transition:  .18s cubic-bezier(.4,0,.2,1);
 }
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{font-size:16px;-webkit-text-size-adjust:100%}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-base);color:var(--text-1);line-height:1.6;min-height:100vh}
+body{
+  font-family:'Inter',system-ui,sans-serif;
+  color:var(--text-1);
+  line-height:1.6;
+  min-height:100vh;
+  /* Same treatment as the POS .public-auth-bg: dimmed hero photo, fixed so it
+     stays put while the tables scroll. */
+  background-color:var(--bg-base);
+  background-image:linear-gradient(rgba(10,22,40,.82),rgba(10,22,40,.88)),url('/platform-admin/assets/pos-background.webp');
+  background-size:cover;
+  background-position:center;
+  background-attachment:fixed;
+}
 a{color:var(--accent-h);text-decoration:none}
 a:hover{color:var(--text-1)}
 
@@ -43,7 +58,7 @@ a:hover{color:var(--text-1)}
 .pa-nav{flex:1;padding:16px 12px}
 .pa-nav-label{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text-3);padding:8px 8px 4px}
 .pa-nav-link{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--radius-sm);font-size:.875rem;font-weight:500;color:var(--text-2);transition:background var(--transition),color var(--transition);text-decoration:none}
-.pa-nav-link:hover,.pa-nav-link.active{background:rgba(99,102,241,.15);color:var(--text-1)}
+.pa-nav-link:hover,.pa-nav-link.active{background:rgba(47,127,245,.15);color:var(--text-1)}
 .pa-nav-link.active{color:var(--accent-h)}
 .pa-nav-icon{width:18px;text-align:center}
 .pa-sidebar-footer{padding:16px 20px;border-top:1px solid var(--border);font-size:.78rem;color:var(--text-3)}
@@ -81,7 +96,7 @@ a:hover{color:var(--text-1)}
 .pa-table td{padding:11px 14px;border-bottom:1px solid var(--border);color:var(--text-2);vertical-align:middle}
 .pa-table tbody tr:last-child td{border-bottom:none}
 .pa-table tbody tr{transition:background var(--transition)}
-.pa-table tbody tr:hover{background:rgba(99,102,241,.06)}
+.pa-table tbody tr:hover{background:rgba(47,127,245,.06)}
 .pa-table .store-name{font-weight:600;color:var(--text-1)}
 
 /* Badges */
@@ -130,17 +145,22 @@ textarea.form-control{resize:vertical;min-height:80px}
 .alert{display:flex;align-items:flex-start;gap:10px;padding:13px 16px;border-radius:var(--radius-sm);font-size:.875rem;margin-bottom:18px}
 .alert-error{background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.3);color:#fda4af}
 .alert-success{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);color:#6ee7b7}
-.alert-info{background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.3);color:#a5b4fc}
+.alert-info{background:rgba(47,127,245,.12);border:1px solid rgba(47,127,245,.3);color:#a5b4fc}
 
 /* Login */
-.pa-login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse 80% 80% at 50% -20%,rgba(99,102,241,.25),transparent),radial-gradient(ellipse 60% 60% at 80% 80%,rgba(139,92,246,.12),transparent),var(--bg-base);padding:24px}
+/* Login / 2FA pages. Same hero photo + dimming as the dashboard body, otherwise
+   this wrapper would paint over it with a flat --bg-base and the brand image
+   would be missing on the two pages users see first. */
+.pa-login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background-image:linear-gradient(rgba(10,22,40,.82),rgba(10,22,40,.88)),url('/platform-admin/assets/pos-background.webp');
+  background-size:cover;background-position:center;background-attachment:fixed;padding:24px}
 .pa-login-box{width:100%;max-width:400px;background:rgba(17,24,39,.85);border:1px solid var(--border);border-radius:var(--radius-lg);padding:38px 36px;box-shadow:0 24px 80px rgba(0,0,0,.7);backdrop-filter:blur(20px);animation:slideUp .4s ease}
 @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
 .pa-login-logo{text-align:center;margin-bottom:28px}
 .pa-login-icon{width:56px;height:56px;border-radius:16px;margin:0 auto 14px;background:linear-gradient(135deg,var(--accent),var(--violet));display:flex;align-items:center;justify-content:center;font-size:26px}
 .pa-login-title{font-size:1.5rem;font-weight:800;color:var(--text-1)}
 .pa-login-sub{font-size:.83rem;color:var(--text-3);margin-top:4px}
-.totp-code{text-align:center;font-size:2.2rem;font-weight:800;letter-spacing:.25em;color:var(--accent-h);background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius-sm);padding:10px;margin:4px 0 18px}
+.totp-code{text-align:center;font-size:2.2rem;font-weight:800;letter-spacing:.25em;color:var(--accent-h);background:rgba(47,127,245,.08);border:1px solid rgba(47,127,245,.25);border-radius:var(--radius-sm);padding:10px;margin:4px 0 18px}
 .qr-area{text-align:center;margin:14px 0;padding:20px 16px 16px;border-radius:var(--radius-sm);background:rgba(255,255,255,.04);border:1px solid var(--border)}
 .qr-step{font-size:.78rem;color:var(--text-2);margin-bottom:6px;text-align:left}
 .qr-step strong{color:var(--text-1)}
@@ -177,8 +197,8 @@ textarea.form-control{resize:vertical;min-height:80px}
 .pa-search-icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--text-3);font-size:.9rem;pointer-events:none}
 .pa-tabs{display:flex;gap:4px;margin-bottom:20px;flex-wrap:wrap}
 .pa-tab{padding:6px 14px;border-radius:100px;font-size:.78rem;font-weight:600;background:rgba(255,255,255,.05);color:var(--text-3);border:1px solid transparent;cursor:pointer;text-decoration:none;transition:all var(--transition)}
-.pa-tab:hover{background:rgba(99,102,241,.1);color:var(--text-2)}
-.pa-tab.active{background:rgba(99,102,241,.2);color:var(--accent-h);border-color:rgba(99,102,241,.3)}
+.pa-tab:hover{background:rgba(47,127,245,.1);color:var(--text-2)}
+.pa-tab.active{background:rgba(47,127,245,.2);color:var(--accent-h);border-color:rgba(47,127,245,.3)}
 .text-muted{color:var(--text-3);font-size:.8rem}
 .text-sm{font-size:.875rem}
 .flex{display:flex}
@@ -201,3 +221,68 @@ textarea.form-control{resize:vertical;min-height:80px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(148,163,184,.35)}
 @media(max-width:900px){.pa-sidebar{width:200px}.pa-content{padding:16px}.pa-stats{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:640px){.pa-sidebar{display:none}.pa-stats{grid-template-columns:repeat(2,1fr)}.pa-topbar{padding:12px 16px}.pa-content{padding:14px}.grid-2{grid-template-columns:1fr}}
+
+/* ── ProCast brand type ───────────────────────────────────────────────────
+   Poppins for display/heading text, exactly as the POS does it. */
+.pa-logo-text,
+.pa-topbar-title,
+.pa-card-title,
+.pa-stat-value,
+.pa-tab,
+.btn-primary,
+.modal-title,
+.pa-login-title{
+  font-family:'Poppins',sans-serif;
+}
+.pa-logo-text,.pa-topbar-title{font-weight:700}
+.pa-stat-value{font-weight:800;line-height:1}
+.pa-login-title{font-weight:800;letter-spacing:-.01em}
+
+/* ── Inline SVG icons (replacing the emoji) ───────────────────────────────
+   Icons inherit currentColor so they tint with the button/badge they sit in. */
+.pa-ico{
+  width:16px;height:16px;
+  flex-shrink:0;
+  vertical-align:-3px;
+  stroke:currentColor;
+  fill:none;
+  stroke-width:2;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.pa-ico-lg{width:28px;height:28px;stroke-width:1.8}
+.pa-ico-xl{width:40px;height:40px;stroke-width:1.6}
+.pa-nav-icon{display:inline-flex;align-items:center;justify-content:center;width:18px}
+.pa-search-icon{display:inline-flex;align-items:center;justify-content:center;pointer-events:none}
+.pa-logo-icon{
+  background:linear-gradient(135deg,var(--accent),var(--violet));
+  color:#fff;
+}
+.pa-btn-ico{display:inline-flex;align-items:center;gap:6px}
+
+/* Client-type pill on the stores list */
+.badge-client{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:100px;font-size:.7rem;font-weight:600;white-space:nowrap;background:rgba(47,127,245,.15);color:var(--accent-h);border:1px solid rgba(47,127,245,.25)}
+.badge-client::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.badge-client.local{background:rgba(244,160,36,.15);color:var(--amber);border-color:rgba(244,160,36,.3)}
+.badge-client.app{background:rgba(59,165,92,.15);color:var(--emerald);border-color:rgba(59,165,92,.3)}
+
+/* Danger zone — deliberately visually separated from the normal actions */
+.danger-zone{border:1px solid rgba(229,72,77,.4);background:rgba(229,72,77,.06)}
+.danger-zone .pa-card-header{border-bottom-color:rgba(229,72,77,.3)}
+.danger-zone .pa-card-title{color:var(--rose)}
+
+/* Six-digit pairing code, styled like the POS TOTP input */
+.pairing-code{
+  font-family:'Courier New',monospace;
+  font-size:1.6rem;
+  font-weight:700;
+  letter-spacing:.35em;
+  text-align:center;
+  color:var(--accent-h);
+  background:rgba(0,0,0,.4);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  padding:14px 10px;
+  margin:0;
+  user-select:all;
+}

@@ -236,6 +236,41 @@ function initTotpQr() {
 }
 
 /* ── TOTP secret: one-click copy ─────────────────────────────── */
+function initCodeCopy() {
+  const btn = document.getElementById('btn-copy-code');
+  const el  = document.getElementById('flash-pairing-code');
+  if (!btn || !el) return;
+
+  const original = btn.textContent;
+  btn.addEventListener('click', async () => {
+    const code = el.textContent.replace(/\s+/g, '');
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(code);
+        ok = true;
+      }
+    } catch (_) { /* fall through to the legacy path below */ }
+    if (!ok) {
+      // execCommand path -- still needed on a plain-HTTP internal host, where
+      // navigator.clipboard is unavailable.
+      const ta = document.createElement('textarea');
+      ta.value = code;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+      document.body.removeChild(ta);
+    }
+    btn.textContent = ok ? 'Copied!' : 'Select & copy';
+    btn.classList.toggle('copied', ok);
+    if (!ok) el.style.userSelect = 'all'; // let them drag-select manually
+    setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 2200);
+  });
+}
+
 function initSecretCopy() {
   const btn = document.getElementById('btn-copy-secret');
   const el  = document.getElementById('totp-secret');
@@ -276,4 +311,5 @@ document.addEventListener('DOMContentLoaded', () => {
   initStoreSearch();
   initTotpQr();
   initSecretCopy();
+  initCodeCopy();
 });

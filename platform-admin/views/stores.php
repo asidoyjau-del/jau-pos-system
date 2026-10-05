@@ -1,10 +1,16 @@
-﻿<?php
+<?php
 /** @var list<array<string,mixed>> $rows @var string $status @var string $q @var array $counts @var string $csrf */
 use ProCast\Support\View;
 $e = [View::class, 'e'];
 
 $tabStatuses = ['pending_approval' => 'Pending', 'active' => 'Active', 'suspended' => 'Suspended', 'rejected' => 'Rejected', 'all' => 'All'];
 $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active', 'suspended' => 'badge-suspended', 'rejected' => 'badge-rejected'];
+// How the store runs ProCast: browser / installed PWA / offline install.
+$clientTypes = [
+  'web'   => ['label' => 'Web',       'cls' => ''],
+  'app'   => ['label' => 'App',       'cls' => 'app'],
+  'local' => ['label' => 'Local POS', 'cls' => 'local'],
+];
 ?>
 <div class="pa-tabs" role="tablist">
 <?php foreach ($tabStatuses as $s => $label): ?>
@@ -25,7 +31,7 @@ $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active
     <form method="GET" action="/platform-admin/stores" id="store-search-form" style="display:flex;gap:8px;align-items:center">
       <input type="hidden" name="status" value="<?= $e($status) ?>">
       <div class="pa-search-wrap">
-        <span class="pa-search-icon">🔍</span>
+        <span class="pa-search-icon"><?= $e(View::icon('search')) ?></span>
         <input type="text" name="q" class="form-control" value="<?= $e($q) ?>"
                placeholder="Search stores…" autocomplete="off" style="width:220px">
       </div>
@@ -35,29 +41,30 @@ $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active
     <table class="pa-table">
       <thead>
         <tr>
-          <th>Store</th><th>Owner</th><th>Contact</th><th>Status</th><th>Tier</th><th>Registered</th><th>Actions</th>
+          <th>Store</th><th>Owner</th><th>Contact</th><th>Client</th><th>Status</th><th>Tier</th><th>Registered</th><th>Actions</th>
         </tr>
       </thead>
       <tbody>
       <?php if (empty($rows)): ?>
-        <tr><td colspan="7" class="text-muted" style="text-align:center;padding:32px">No stores found.</td></tr>
+        <tr><td colspan="8" class="text-muted" style="text-align:center;padding:32px">No stores found.</td></tr>
       <?php else: foreach ($rows as $r): ?>
         <tr>
           <td>
-            <div class="store-name"><a href="/platform-admin/stores/<?= $e($r['id']) ?>"><?= $e($r['name']) ?></a></div>
+            <div class="store-name"><a href="/platform-admin/stores/<?= $e($r['id']) ?>"><?= $e($r['display_name'] ?: $r['name']) ?></a></div>
             <div class="text-muted font-mono">#<?= $e($r['id']) ?></div>
           </td>
           <td>
-            <div><?= $e($r['owner_name'] ?? '—') ?></div>
-            <div class="text-muted"><?= $e($r['owner_email'] ?? '') ?></div>
+            <div><?= $e($r['display_owner'] ?: '—') ?></div>
+            <div class="text-muted"><?= $e($r['display_email'] ?: '') ?></div>
           </td>
-          <td class="text-muted"><?= $e($r['contact_phone'] ?? '—') ?></td>
+          <td class="text-muted"><?= $e($r['contact_phone'] ?? '') ?></td>
+          <td><span class="badge-client <?= $e($clientTypes[$r['client_type'] ?? 'web']['cls'] ?? '') ?>"><?= $e($clientTypes[$r['client_type'] ?? 'web']['label'] ?? 'Web') ?></span></td>
           <td><span class="badge <?= $e($badgeMap[$r['status']] ?? '') ?>"><?= $e($r['status']) ?></span></td>
           <td class="text-muted"><?= $e($r['subscription_tier'] ?? '—') ?></td>
           <td class="text-muted"><?= $e(substr($r['registered_at'] ?? $r['created_at'] ?? '', 0, 10)) ?></td>
           <td>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <a href="/platform-admin/stores/<?= $e($r['id']) ?>" class="btn btn-ghost btn-sm">View</a>
+              <a href="/platform-admin/stores/<?= $e($r['id']) ?>" class="btn btn-ghost btn-sm"><?= $e(View::icon('eye')) ?> View</a>
               <?php if ($r['status'] === 'pending_approval'): ?>
               <button class="btn btn-emerald btn-sm" data-confirm='<?= json_encode([
                 "title"   => "Approve store?",
@@ -66,7 +73,7 @@ $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active
                 "btnClass"=> "btn-emerald",
                 "btnLabel"=> "Approve",
                 "redirect"=> "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'>✅ Approve</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'> Approve</button>
               <button class="btn btn-rose btn-sm" data-confirm='<?= json_encode([
                 "title"        => "Reject store?",
                 "desc"         => "Reject \"" . addslashes($r['name']) . "\". The applicant will be notified.",
@@ -75,7 +82,7 @@ $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active
                 "btnClass"     => "btn-rose",
                 "btnLabel"     => "Reject",
                 "redirect"     => "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'>✗ Reject</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'> Reject</button>
               <?php elseif ($r['status'] === 'active'): ?>
               <button class="btn btn-amber btn-sm" data-confirm='<?= json_encode([
                 "title"        => "Suspend store?",
@@ -86,7 +93,7 @@ $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active
                 "btnClass"     => "btn-amber",
                 "btnLabel"     => "Suspend",
                 "redirect"     => "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'>⏸ Suspend</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'> Suspend</button>
               <?php elseif ($r['status'] === 'suspended'): ?>
               <button class="btn btn-emerald btn-sm" data-confirm='<?= json_encode([
                 "title"   => "Reactivate store?",
@@ -95,8 +102,18 @@ $badgeMap    = ['pending_approval' => 'badge-pending', 'active' => 'badge-active
                 "btnClass"=> "btn-emerald",
                 "btnLabel"=> "Reactivate",
                 "redirect"=> "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'>▶ Reactivate</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'> Reactivate</button>
               <?php endif; ?>
+              <button class="btn btn-rose btn-sm" data-confirm='<?= json_encode([
+                "title"        => "Permanently delete " . $r['name'] . "?",
+                "desc"         => "This erases the store and all of its users for good. Type the store name below to confirm.",
+                "confirmText"  => (string)$r['name'],
+                "requireReason"=> true,
+                "action"       => "/platform-admin/stores/" . $r['id'] . "/delete",
+                "btnClass"     => "btn-rose",
+                "btnLabel"     => "Delete",
+                "redirect"     => "/platform-admin/stores",
+              ], JSON_UNESCAPED_UNICODE) ?>'><?= $e(View::icon('trash')) ?> Delete</button>
             </div>
           </td>
         </tr>

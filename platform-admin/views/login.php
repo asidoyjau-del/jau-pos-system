@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /** @var string|null $error @var string $csrf @var bool $twoFactor */
 use ProCast\Support\Env;
 use ProCast\Support\View;
@@ -19,13 +19,13 @@ $twoFactor = $twoFactor ?? false;
 <div class="pa-login-wrap">
   <div class="pa-login-box">
     <div class="pa-login-logo">
-      <div class="pa-login-icon">🛡️</div>
+      <div class="pa-login-icon"><?=$e(View::icon('shield', 'pa-ico-xl')) ?></div>
       <div class="pa-login-title">Platform Admin</div>
       <div class="pa-login-sub">ProCast Super Admin Portal</div>
     </div>
 
     <?php if ($error): ?>
-    <div class="alert alert-error" role="alert">⚠️ <?= $e($error) ?></div>
+    <div class="alert alert-error" role="alert"> <?= $e($error) ?></div>
     <?php endif; ?>
 
     <form method="POST" action="/platform-admin/login" autocomplete="off" novalidate id="login-form">
