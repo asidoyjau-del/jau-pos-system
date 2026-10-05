@@ -29,6 +29,10 @@ final class Kernel
         // strict CSP below only allows same-origin scripts, and 2FA
         // enrollment must work on fully-offline installs.
         'qrcode.min.js' => 'application/javascript; charset=utf-8',
+        // Same hero background the POS login screen uses, so the admin portal
+        // and the product share one brand. Copied from /assets so the isolated
+        // /platform-admin router can serve it (no cross-directory file reads).
+        'pos-background.webp' => 'image/webp',
     ];
 
     private ?PDO $pdo = null;
@@ -123,13 +127,24 @@ final class Kernel
             if ($path === '/logout') {
                 return $this->auth()->logout($req, $session);
             }
-            if (preg_match('#^/stores/(\d{1,10})/(approve|reject|suspend|reactivate)$#', $path, $m)) {
+            if (preg_match('#^/users/(\d{1,10})/pairing$#', $path, $m)) {
+                return $dash->issueUserPairing($req, $session, $admin, (int)$m[1]);
+            }
+            // Re-shows a still-live code so the admin can read it out when the
+            // email never arrived. Same CSRF/guard path as issuing one.
+            if (preg_match('#^/users/(\d{1,10})/pairing/reveal$#', $path, $m)) {
+                return $dash->revealUserPairing($req, $session, $admin, (int)$m[1]);
+            }
+            if (preg_match('#^/stores/(\d{1,10})/(approve|reject|suspend|reactivate|delete|client-type|pairing)$#', $path, $m)) {
                 $id = (int)$m[1];
                 return match ($m[2]) {
-                    'approve'    => $dash->approve($req, $session, $admin, $id, $now),
-                    'reject'     => $dash->reject($req, $session, $admin, $id),
-                    'suspend'    => $dash->suspend($req, $session, $admin, $id),
-                    'reactivate' => $dash->reactivate($req, $session, $admin, $id),
+                    'approve'     => $dash->approve($req, $session, $admin, $id, $now),
+                    'reject'      => $dash->reject($req, $session, $admin, $id),
+                    'suspend'     => $dash->suspend($req, $session, $admin, $id),
+                    'reactivate'  => $dash->reactivate($req, $session, $admin, $id),
+                    'delete'      => $dash->destroy($req, $session, $admin, $id),
+                    'client-type' => $dash->setClientType($req, $session, $admin, $id),
+                    'pairing'     => $dash->issuePairing($req, $session, $admin, $id),
                 };
             }
         }

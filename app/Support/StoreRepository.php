@@ -33,24 +33,48 @@ final class StoreRepository
         return $out;
     }
 
-    /** @return list<array<string,mixed>> */
+    /**
+ * Store list. Falls back to the users table for owner_name / owner_email and
+ * to settings.shop_name for the store name.
+ *
+ * Why: stores created before migration 002 have NULL owner_name/owner_email
+ * even though the real owner exists as users.role='owner', and migration 001
+ * gave every store the literal name 'ProCast'. Reading them live means the
+ * list is correct immediately, whether or not the backfill migration has run.
+ *
+ * @return list<array<string,mixed>>
+ */
     public function list(?string $status, string $q, int $limit = 100): array
     {
-        $sql = 'SELECT id, name, owner_name, owner_email, contact_phone, address, status, subscription_tier,
-                       verification_doc, rejection_reason, registered_at, created_at, approved_at
-                FROM stores WHERE 1=1';
+        $sql = "SELECT s.id, s.name, s.owner_name, s.owner_email, s.contact_phone, s.address,
+                       s.status, s.subscription_tier, s.client_type, s.verification_doc,
+                       s.rejection_reason, s.registered_at, s.created_at, s.approved_at,
+                       COALESCE(NULLIF(s.owner_name, ''), u.full_name)      AS display_owner,
+                       COALESCE(NULLIF(s.owner_email, ''), u.email)         AS display_email,
+                       COALESCE(NULLIF(s.name, ''), sn.shop_name)           AS display_name
+                FROM stores s
+                LEFT JOIN LATERAL (
+                    SELECT full_name, email FROM users
+                     WHERE store_id = s.id AND role = 'owner'
+                     ORDER BY id LIMIT 1
+                ) u ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT value AS shop_name FROM settings
+                     WHERE store_id = s.id AND key = 'shop_name' LIMIT 1
+                ) sn ON TRUE
+                WHERE 1=1";
         $args = [];
         if ($status !== null && in_array($status, self::STATUSES, true)) {
-            $sql .= ' AND status = ?';
+            $sql .= ' AND s.status = ?';
             $args[] = $status;
         }
         $q = trim($q);
         if ($q !== '') {
             $like = self::like($q);
-            $sql .= " AND (LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(owner_name,'')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(owner_email,'')) LIKE ? ESCAPE '\\')";
-            array_push($args, $like, $like, $like);
+            $sql .= " AND (LOWER(s.name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.owner_name,'')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.owner_email,'')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(u.full_name,'')) LIKE ? ESCAPE '\\')";
+            array_push($args, $like, $like, $like, $like);
         }
-        $sql .= ' ORDER BY COALESCE(registered_at, created_at) DESC, id DESC LIMIT ' . max(1, min(500, $limit));
+        $sql .= ' ORDER BY COALESCE(s.registered_at, s.created_at) DESC, s.id DESC LIMIT ' . max(1, min(500, $limit));
         $st = $this->db->prepare($sql);
         $st->execute($args);
         return $st->fetchAll(PDO::FETCH_ASSOC);
@@ -59,7 +83,34 @@ final class StoreRepository
     /** @return array<string,mixed>|null */
     public function find(int $id): ?array
     {
-        $st = $this->db->prepare('SELECT * FROM stores WHERE id = ?');
+        // Same owner/name fallback as list() so the detail page shows the real
+        // values for stores created before migration 002.
+        $st = $this->db->prepare(
+            "SELECT s.*,
+                    COALESCE(NULLIF(s.owner_name, ''), u.full_name) AS display_owner,
+                    COALESCE(NULLIF(s.owner_email, ''), u.email)    AS display_email,
+                    COALESCE(NULLIF(s.name, ''), sn.shop_name)      AS display_name
+               FROM stores s
+               LEFT JOIN LATERAL (
+                   SELECT full_name, email FROM users
+                    WHERE store_id = s.id AND role = 'owner'
+                    ORDER BY id LIMIT 1
+               ) u ON TRUE
+               LEFT JOIN LATERAL (
+                   SELECT value AS shop_name FROM settings
+                    WHERE store_id = s.id AND key = 'shop_name' LIMIT 1
+               ) sn ON TRUE
+              WHERE s.id = ?"
+        );
+        $st->execute([$id]);
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        return $r ?: null;
+    }
+
+    /** @return array<string,mixed>|null */
+    public function findUser(int $id): ?array
+    {
+        $st = $this->db->prepare('SELECT id, username, full_name, email, role, store_id, last_login FROM users WHERE id = ?');
         $st->execute([$id]);
         $r = $st->fetch(PDO::FETCH_ASSOC);
         return $r ?: null;
@@ -106,6 +157,224 @@ final class StoreRepository
         $st = $this->db->prepare('DELETE FROM auth_tokens WHERE user_id IN (SELECT id FROM users WHERE store_id = ?)');
         $st->execute([$storeId]);
         return $st->rowCount();
+    }
+
+    // ── Client type (how the store runs ProCast) ─────────────────────────
+
+    public const CLIENT_TYPES = ['web', 'app', 'local'];
+
+    public function setClientType(int $id, string $clientType): bool
+    {
+        if (!in_array($clientType, self::CLIENT_TYPES, true)) {
+            return false;
+        }
+        $st = $this->db->prepare('UPDATE stores SET client_type = ? WHERE id = ?');
+        $st->execute([$clientType, $id]);
+        return $st->rowCount() === 1;
+    }
+
+    // ── Hard delete ──────────────────────────────────────────────────────
+
+    /**
+     * Permanently removes a store and everything that belongs to it.
+     *
+     * Caller MUST already hold an open transaction and MUST have written the
+     * platform_deleted_stores tombstone row first (see
+     * SuperAdminDashboardController::destroy). Children are removed explicitly
+     * rather than relying on ON DELETE CASCADE because the POS schema predates
+     * the platform migrations and cannot be relied on to have those clauses.
+     *
+     * @return array{deleted:array<string,int>,ok:bool}  counts per child table
+     */
+    public function destroy(int $storeId): array
+    {
+        $out = ['auth_tokens' => 0, 'users' => 0, 'settings' => 0, 'categories' => 0, 'pairings' => 0, 'stores' => 0];
+
+        $st = $this->db->prepare('DELETE FROM auth_tokens WHERE user_id IN (SELECT id FROM users WHERE store_id = ?)');
+        $st->execute([$storeId]);
+        $out['auth_tokens'] = $st->rowCount();
+
+        foreach (['users', 'settings', 'categories'] as $table) {
+            // `key` is a reserved word in MySQL but not PostgreSQL; the platform
+            // module is PostgreSQL-only (see Db.php), so the bare name is safe.
+            $st = $this->db->prepare("DELETE FROM {$table} WHERE store_id = ?");
+            $st->execute([$storeId]);
+            $out[$table] = $st->rowCount();
+        }
+
+        $st = $this->db->prepare('DELETE FROM platform_store_pairings WHERE store_id = ?');
+        $st->execute([$storeId]);
+        $out['pairings'] = $st->rowCount();
+
+        $st = $this->db->prepare('DELETE FROM stores WHERE id = ?');
+        $st->execute([$storeId]);
+        $out['stores'] = $st->rowCount();
+
+        return ['deleted' => $out, 'ok' => $out['stores'] === 1];
+    }
+
+    public function userCount(int $storeId): int
+    {
+        $st = $this->db->prepare('SELECT COUNT(*) FROM users WHERE store_id = ?');
+        $st->execute([$storeId]);
+        return (int)$st->fetchColumn();
+    }
+
+    /** Append-only tombstone so an irreversible delete is still auditable. */
+    public function recordDeletion(int $storeId, array $store, int $userCount, ?int $adminId, string $reason): void
+    {
+        $st = $this->db->prepare(
+            'INSERT INTO platform_deleted_stores (store_id, store_name, owner_name, owner_email, user_count, deleted_by, reason)
+             VALUES (?,?,?,?,?,?,?)'
+        );
+        $st->execute([
+            $storeId,
+            (string)($store['name'] ?? ''),
+            $store['owner_name'] ?? null,
+            $store['owner_email'] ?? null,
+            $userCount,
+            $adminId,
+            $reason,
+        ]);
+    }
+
+    // ── Local-POS pairing codes ──────────────────────────────────────────
+
+    /**
+     * Issues a 6-digit code for an offline install.
+     *
+     * $codeCipher is the AES-256-GCM ciphertext of the code (migration 005), kept
+     * only so a super admin can re-copy a LIVE code when the email never arrived.
+     * It is NULLed by every retire path and is never accepted for redemption —
+     * $codeHash is the only thing that authorises a redeem.
+     */
+    public function issuePairing(int $storeId, ?int $adminId, string $codeHash, string $expiresAtUtc, ?string $codeCipher = null): void
+    {
+        $this->db->prepare(
+            'INSERT INTO platform_store_pairings (store_id, code_hash, code_cipher, created_by, expires_at) VALUES (?,?,?,?,?)'
+        )->execute([$storeId, $codeHash, $codeCipher, $adminId, $expiresAtUtc]);
+    }
+
+    /**
+ * Burns any previously issued but still-unused codes for this store.
+ * Call AFTER issuing the new one, so the newest code always wins and an old
+ * code sitting in a lost email can't be redeemed later.
+ */
+    public function invalidatePairings(int $storeId): void
+    {
+        $this->db->prepare(
+            'UPDATE platform_store_pairings SET used_at = ?, code_cipher = NULL
+              WHERE store_id = ? AND used_at IS NULL'
+        )->execute([gmdate('Y-m-d H:i:s'), $storeId]);
+    }
+
+    // ── Per-ACCOUNT activation codes ──────────────────────────────────────
+
+    /**
+     * Issues a 6-digit code bound to ONE user account. Any earlier unused code
+     * for that account is retired first so exactly one code is ever live —
+     * belt-and-braces alongside the partial unique index, which is the real
+     * guarantee (this keeps the common path from tripping it).
+     */
+    public function issueUserPairing(int $userId, ?int $storeId, ?int $adminId, string $codeHash, string $expiresAtUtc, ?string $codeCipher = null): void
+    {
+        $this->db->prepare(
+            'UPDATE platform_user_pairings SET used_at = ?, code_cipher = NULL
+              WHERE user_id = ? AND used_at IS NULL'
+        )->execute([gmdate('Y-m-d H:i:s'), $userId]);
+        $this->db->prepare(
+            'INSERT INTO platform_user_pairings (user_id, store_id, code_hash, code_cipher, created_by, expires_at) VALUES (?,?,?,?,?,?)'
+        )->execute([$userId, $storeId, $codeHash, $codeCipher, $adminId, $expiresAtUtc]);
+    }
+
+    /**
+     * Every account belonging to a store, with its activation-code state so the
+     * admin can see who still needs a code and who already redeemed one.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function usersOfStore(int $storeId): array
+    {
+        $st = $this->db->prepare(
+            "SELECT u.id, u.username, u.full_name, u.email, u.role, u.last_login,
+                    p.id          AS pairing_id,
+                    p.created_at  AS pairing_created_at,
+                    p.expires_at  AS pairing_expires_at,
+                    p.used_at     AS pairing_used_at
+               FROM users u
+               LEFT JOIN LATERAL (
+                   SELECT id, created_at, expires_at, used_at
+                     FROM platform_user_pairings
+                    WHERE user_id = u.id AND used_at IS NULL
+                    ORDER BY created_at DESC LIMIT 1
+               ) p ON TRUE
+              WHERE u.store_id = ?
+              ORDER BY (u.role = 'owner') DESC, u.id ASC"
+        );
+        $st->execute([$storeId]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Revokes any live code for one account. Used when the admin wants to force
+     * someone to activate again (e.g. after a reinstall of the local POS).
+     */
+    public function revokeUserPairing(int $userId): void
+    {
+        $this->db->prepare(
+            'UPDATE platform_user_pairings SET used_at = ?, code_cipher = NULL WHERE user_id = ? AND used_at IS NULL'
+        )->execute([gmdate('Y-m-d H:i:s'), $userId]);
+    }
+
+    /**
+     * Redeems a pairing code. Returns the store id on success, or null when the
+     * code is unknown, already used, or expired. Single-use by construction:
+     * the UPDATE only matches while used_at IS NULL.
+     */
+    public function redeemPairing(string $codeHash, string $nowUtc): ?int
+    {
+        $st = $this->db->prepare(
+            'UPDATE platform_store_pairings SET used_at = ?
+              WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
+           RETURNING store_id'
+        );
+        $st->execute([$nowUtc, $codeHash, $nowUtc]);
+        $id = $st->fetchColumn();
+        return $id === false || $id === null ? null : (int)$id;
+    }
+
+    /**
+     * The ciphertext of one account's LIVE, unexpired activation code, or null
+     * when there is none to show (already redeemed, revoked, expired, or issued
+     * before migration 005). Callers decrypt with Crypto::decrypt.
+     *
+     * Deliberately strict about "live": an expired code is useless to the user
+     * and re-copying it would only waste the admin's time, so it is reported as
+     * absent rather than as a code that cannot work.
+     */
+    public function liveUserPairingCipher(int $userId, string $nowUtc): ?string
+    {
+        $st = $this->db->prepare(
+            'SELECT code_cipher FROM platform_user_pairings
+              WHERE user_id = ? AND used_at IS NULL AND expires_at > ? AND code_cipher IS NOT NULL
+              ORDER BY created_at DESC LIMIT 1'
+        );
+        $st->execute([$userId, $nowUtc]);
+        $cipher = $st->fetchColumn();
+        return $cipher === false || $cipher === null ? null : (string)$cipher;
+    }
+
+    /** Live (unused, unexpired) pairings for a store — shown on the detail page. */
+    public function pairingsFor(int $storeId, string $nowUtc): array
+    {
+        $st = $this->db->prepare(
+            'SELECT id, created_at, expires_at, used_at
+               FROM platform_store_pairings
+              WHERE store_id = ? AND used_at IS NULL AND expires_at > ?
+           ORDER BY created_at DESC LIMIT 10'
+        );
+        $st->execute([$storeId, $nowUtc]);
+        return $st->fetchAll(PDO::FETCH_ASSOC);
     }
 
     /** Default POS settings + categories for a freshly approved store (idempotent). */
@@ -173,9 +442,16 @@ final class StoreRepository
     public function searchUsers(string $q, int $now, int $limit = 50): array
     {
         $sql = "SELECT u.id, u.username, u.full_name, u.role, u.email, u.store_id, u.last_login,
-                       s.name AS store_name, s.status AS store_status,
+                       s.name AS store_name, s.status AS store_status, s.client_type,
+                       COALESCE(NULLIF(s.name, ''), sn.shop_name) AS display_store_name,
                        (SELECT COUNT(*) FROM auth_tokens t WHERE t.user_id = u.id AND t.expires_at > ?) AS live_tokens
-                FROM users u LEFT JOIN stores s ON s.id = u.store_id WHERE 1=1";
+                FROM users u
+                LEFT JOIN stores s ON s.id = u.store_id
+                LEFT JOIN LATERAL (
+                    SELECT value AS shop_name FROM settings
+                     WHERE store_id = u.store_id AND key = 'shop_name' LIMIT 1
+                ) sn ON TRUE
+                WHERE 1=1";
         $args = [gmdate('Y-m-d H:i:s', $now)];
         $q = trim($q);
         if ($q !== '') {

@@ -23,6 +23,12 @@ final class Audit
     public const STORE_REJECTED   = 'STORE_REJECTED';
     public const STORE_SUSPENDED  = 'STORE_SUSPENDED';
     public const STORE_REACTIVATED = 'STORE_REACTIVATED';
+    public const STORE_DELETED    = 'STORE_DELETED';
+    public const STORE_CLIENT_SET = 'STORE_CLIENT_TYPE_SET';
+    public const PAIRING_ISSUED   = 'PAIRING_CODE_ISSUED';
+    public const PAIRING_USED     = 'PAIRING_CODE_USED';
+    public const PAIRING_FAILED   = 'PAIRING_CODE_FAILED';
+    public const PAIRING_REVEALED = 'PAIRING_CODE_REVEALED';
     public const EMAIL_SENT       = 'NOTIFICATION_EMAIL_SENT';
     public const EMAIL_FAILED     = 'NOTIFICATION_EMAIL_FAILED';
     public const DOCUMENT_VIEWED  = 'DOCUMENT_VIEWED';
