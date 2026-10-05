@@ -2373,7 +2373,7 @@ if (isset($_GET['api'])) {
     // ── CLOUD SYNC ENDPOINTS (AUTHENTICATED VIA SYNC_TOKEN) ──
     // Allows local POS systems to sync data bidirectionally with this online deployment
     // over HTTPS without needing user session cookies or CSRF tokens.
-    if (in_array($action, ['cloud_sync_ping', 'cloud_sync_pull', 'cloud_sync_push', 'cloud_auth_login'], true)) {
+    if (in_array($action, ['cloud_sync_ping', 'cloud_sync_pull', 'cloud_sync_push', 'cloud_auth_login', 'cloud_pair_redeem'], true)) {
         $headerToken = $_SERVER['HTTP_X_SYNC_TOKEN'] ?? '';
         $queryToken = $_GET['sync_token'] ?? ($_POST['sync_token'] ?? '');
         $providedToken = trim((string)($headerToken !== '' ? $headerToken : $queryToken));
@@ -2405,6 +2405,121 @@ if (isset($_GET['api'])) {
                     'store_name' => $storeName,
                     'products_count' => $prodCount,
                     'server_time' => date('Y-m-d H:i:s')
+                ]);
+            }
+
+            if ($action === 'cloud_pair_redeem') {
+                // Redeems a 6-digit activation code typed on a local/offline POS.
+                // Verified here, online, so a code cannot be faked by editing the
+                // offline database. Two scopes are supported:
+                //
+                //   scope=user  -> bound to ONE account. This is the one that
+                //                   matters: every person (owner AND every
+                //                   cashier account) needs their own code, so a
+                //                   newly created account cannot log in until one
+                //                   is issued for it.
+                //   scope=store -> unlocks a whole store/install (legacy, from 003).
+                //
+                // Single-use by construction: the UPDATE only matches while
+                // used_at IS NULL. Stored as a SHA-256 hash, never plaintext.
+                $code     = preg_replace('/\D/', '', (string)($body['code'] ?? ($_POST['code'] ?? '')));
+                $clientIp = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
+                $nowUtc   = gmdate('Y-m-d H:i:s');
+                $codeHash = hash('sha256', (string)$code);
+
+                if (strlen($code) !== 6) {
+                    json(false, null, 'Activation code must be exactly 6 digits.');
+                }
+
+                // ── Per-account code (preferred) ──
+                $st = $db->prepare(
+                    'UPDATE platform_user_pairings
+                        SET used_at = ?, used_ip = ?, code_cipher = NULL
+                      WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
+                   RETURNING user_id'
+                );
+                $st->execute([$nowUtc, $clientIp, $codeHash, $nowUtc]);
+                $userId = $st->fetchColumn();
+
+                if ($userId !== false && $userId !== null) {
+                    $userId = (int)$userId;
+                    $st = $db->prepare('SELECT id, username, full_name, role, store_id FROM users WHERE id = ?');
+                    $st->execute([$userId]);
+                    $u = $st->fetch(PDO::FETCH_ASSOC);
+
+                    if (!$u) {
+                        json(false, null, 'That account no longer exists. Ask your administrator for a new code.');
+                    }
+
+                    $sid = (int)($u['store_id'] ?: 0);
+                    $storeName = '';
+                    $storeOk  = true;
+                    if ($sid > 0) {
+                        $ss = $db->prepare('SELECT name, status FROM stores WHERE id = ?');
+                        $ss->execute([$sid]);
+                        $store = $ss->fetch(PDO::FETCH_ASSOC);
+                        if (!$store || $store['status'] !== 'active') {
+                            // The code is spent; don't leave it "live" for a retry
+                            // against a store that is suspended or deleted.
+                            $storeOk = false;
+                            $storeName = (string)($store['name'] ?? '');
+                        } else {
+                            $storeName = (string)$store['name'];
+                        }
+                    }
+                    if (!$storeOk) {
+                        json(false, null, 'That store is not active. Contact the platform admin.');
+                    }
+
+                    // The account is being used from an offline install.
+                    if ($sid > 0) {
+                        $db->prepare("UPDATE stores SET client_type = 'local' WHERE id = ?")->execute([$sid]);
+                    }
+
+                    json(true, [
+                        'scope'       => 'user',
+                        'user_id'     => (int)$u['id'],
+                        'username'    => (string)$u['username'],
+                        'full_name'   => (string)$u['full_name'],
+                        'role'        => (string)$u['role'],
+                        'store_id'    => $sid,
+                        'store_name'  => $storeName,
+                        'activated_at'=> $nowUtc,
+                    ]);
+                }
+
+                // ── Legacy per-store code (migration 003) ──
+                $st = $db->prepare(
+                    'UPDATE platform_store_pairings
+                        SET used_at = ?, used_ip = ?, code_cipher = NULL
+                      WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
+                   RETURNING store_id'
+                );
+                $st->execute([$nowUtc, $clientIp, $codeHash, $nowUtc]);
+                $storeId = $st->fetchColumn();
+
+                if ($storeId === false || $storeId === null) {
+                    json(false, null, 'That activation code is invalid, expired, or already used.');
+                }
+
+                $storeId = (int)$storeId;
+                $st = $db->prepare('SELECT id, name, status, subscription_tier, client_type FROM stores WHERE id = ?');
+                $st->execute([$storeId]);
+                $store = $st->fetch(PDO::FETCH_ASSOC);
+
+                if (!$store || $store['status'] !== 'active') {
+                    json(false, null, 'That store is not active. Contact the platform admin.');
+                }
+
+                // The store now runs on its own hardware — record that.
+                $db->prepare("UPDATE stores SET client_type = 'local' WHERE id = ?")->execute([$storeId]);
+
+                json(true, [
+                    'scope'        => 'store',
+                    'store_id'     => $storeId,
+                    'store_name'   => (string)$store['name'],
+                    'tier'         => (string)$store['subscription_tier'],
+                    'activated_at' => $nowUtc,
                 ]);
             }
 
@@ -2657,13 +2772,42 @@ if (isset($_GET['api'])) {
                     $dbDriver = $db->getAttribute(PDO::ATTR_DRIVER_NAME);
                     $q = ($dbDriver === 'pgsql') ? '"' : '`';
 
+                    // Resolve WHO rang this sale up to a real users row online, so
+                    // the sale is attributed on the online Sales History instead of
+                    // showing as anonymous revenue. Username is the stable join key
+                    // (it is what the per-account activation code is bound to too);
+                    // the local user_id is only a fallback hint and can collide
+                    // across installs, so it is deliberately NOT trusted first.
+                    $cloudUserId = null;
+                    $cashierKey = trim((string)($tx['cashier_username'] ?? ''));
+                    if ($cashierKey !== '') {
+                        try {
+                            $uStmt = $db->prepare("SELECT id FROM users WHERE username = ? AND store_id = ? LIMIT 1");
+                            $uStmt->execute([$cashierKey, $txStoreId]);
+                            $found = $uStmt->fetchColumn();
+                            if ($found !== false && $found !== null) {
+                                $cloudUserId = (int)$found;
+                            }
+                        } catch (\Throwable $e) {}
+                    }
+                    if ($cloudUserId === null && !empty($tx['local_user_id'])) {
+                        try {
+                            $uStmt = $db->prepare("SELECT id FROM users WHERE id = ? AND store_id = ? LIMIT 1");
+                            $uStmt->execute([(int)$tx['local_user_id'], $txStoreId]);
+                            $found = $uStmt->fetchColumn();
+                            if ($found !== false && $found !== null) {
+                                $cloudUserId = (int)$found;
+                            }
+                        } catch (\Throwable $e) {}
+                    }
+
                     $db->beginTransaction();
                     try {
                         $insTx = $db->prepare("
                             INSERT INTO transactions ({$q}store_id{$q}, {$q}order_ref{$q}, {$q}subtotal{$q}, {$q}vat_rate{$q}, {$q}vat_amount{$q}, {$q}tax_rate{$q}, {$q}tax_amount{$q}, {$q}total{$q}, {$q}cash{$q}, {$q}change{$q}, {$q}user_id{$q}, {$q}created_at{$q})
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ");
-                        $insTx->execute([$txStoreId, $ref, $subtotal, $vatRate, $vatAmount, $taxRate, $taxAmount, $total, $cash, $change, $createdAt]);
+                        $insTx->execute([$txStoreId, $ref, $subtotal, $vatRate, $vatAmount, $taxRate, $taxAmount, $total, $cash, $change, $cloudUserId, $createdAt]);
                         $cloudTxId = lastInsertedId($db);
 
                         $items = $tx['items'] ?? [];
