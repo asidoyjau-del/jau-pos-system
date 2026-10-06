@@ -58,8 +58,13 @@ final class SuperAdminDashboardController
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
     public function stores(Request $req, array &$session, array $admin): Response
     {
-        $status = $req->queryStr('status', 'pending_approval');
-        $filter = $status === 'all' ? null : (in_array($status, StoreRepository::STATUSES, true) ? $status : 'pending_approval');
+        // Default to the "All" tab rather than the pending queue. A super admin
+        // opening /platform-admin/stores wants to see every application at
+        // once; landing on a filtered view made active stores look missing.
+        // An absent or unrecognised ?status= also falls back to All instead of
+        // silently hiding everything that is not pending.
+        $status = $req->queryStr('status', 'all');
+        $filter = $status === 'all' ? null : (in_array($status, StoreRepository::STATUSES, true) ? $status : null);
         $q = $req->queryStr('q');
         return $this->page('stores', $session, $admin, 'Store applications', 'stores', [
             'rows' => $this->stores->list($filter, $q),
@@ -151,9 +156,18 @@ final class SuperAdminDashboardController
         if (!$this->confirmed($req, (string)$store['name'])) {
             return $this->flashBack($session, $storeId, 'error', 'Type the exact store name to confirm the deletion.');
         }
+        // The reason is OPTIONAL. It used to be mandatory (10-500 chars), which
+        // coupled the irreversible delete to a textarea that the UI no longer
+        // shows: any client that did not render that field could never delete.
+        // The typed store name below is the real authorisation; when no reason
+        // is supplied we record an explicit "not given" so the audit trail never
+        // contains a silent blank.
         $reason = trim($req->input('reason'));
-        if (mb_strlen($reason) < 10 || mb_strlen($reason) > 500) {
-            return $this->flashBack($session, $storeId, 'error', 'A reason of 10-500 characters is required for a permanent delete.');
+        if ($reason !== '' && (mb_strlen($reason) < 10 || mb_strlen($reason) > 500)) {
+            return $this->flashBack($session, $storeId, 'error', 'A reason must be 10-500 characters, or left blank.');
+        }
+        if ($reason === '') {
+            $reason = 'Not given';
         }
 
         $userCount = $this->stores->userCount($storeId);
@@ -230,7 +244,7 @@ final class SuperAdminDashboardController
         ));
 
         $session['sa_flash_secret'] = [
-            'label'  => 'Whole-store activation code for ' . (string)$store['name'] . ' (works for every account, expires ' . gmdate('H:i', time() + $ttl) . ' UTC)',
+            'label'  => 'Store link code for ' . (string)$store['name'] . ' (does not unlock accounts, expires ' . gmdate('H:i', time() + $ttl) . ' UTC)',
             'value'  => $code,
             // Renders the large digits + "Copy code" button instead of the
             // "save this key, never shown again" block used for API keys.
@@ -411,7 +425,7 @@ final class SuperAdminDashboardController
         ]);
 
         $session['sa_flash_secret'] = [
-            'label'  => 'Whole-store code for ' . (string)$store['name'] . ' — any account can use this',
+            'label'  => 'Store link code for ' . (string)$store['name'] . ' — unlocks no account',
             'value'  => $code,
             'isCode' => true,
         ];
@@ -499,9 +513,19 @@ final class SuperAdminDashboardController
         if ($store === null) {
             return Response::notFound();
         }
+        // The reason is OPTIONAL, exactly as it is for the hard delete. It used to
+        // be mandatory (10-500 chars) while the modal required the admin to type
+        // the store name as well, and the view asked for the literal "SUSPEND"
+        // that this method never accepted -- so suspending always dead-ended on
+        // "Type the exact store name to confirm". The typed store name below is
+        // the real authorisation; a blank reason is recorded explicitly so the
+        // audit trail never contains a silent blank.
         $reason = trim($req->input('reason'));
-        if (mb_strlen($reason) < 10 || mb_strlen($reason) > 500) {
-            return $this->flashBack($session, $storeId, 'error', 'A suspension reason of 10–500 characters is required.');
+        if ($reason !== '' && (mb_strlen($reason) < 10 || mb_strlen($reason) > 500)) {
+            return $this->flashBack($session, $storeId, 'error', 'A suspension reason must be 10-500 characters, or left blank.');
+        }
+        if ($reason === '') {
+            $reason = 'Not given';
         }
         if (!$this->confirmed($req, (string)$store['name'])) {
             return $this->flashBack($session, $storeId, 'error', 'Type the exact store name to confirm.');

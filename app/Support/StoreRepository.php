@@ -188,11 +188,19 @@ final class StoreRepository
      */
     public function destroy(int $storeId): array
     {
-        $out = ['auth_tokens' => 0, 'users' => 0, 'settings' => 0, 'categories' => 0, 'pairings' => 0, 'stores' => 0];
+        $out = ['auth_tokens' => 0, 'users' => 0, 'settings' => 0, 'categories' => 0, 'pairings' => 0, 'user_pairings' => 0, 'stores' => 0];
 
         $st = $this->db->prepare('DELETE FROM auth_tokens WHERE user_id IN (SELECT id FROM users WHERE store_id = ?)');
         $st->execute([$storeId]);
         $out['auth_tokens'] = $st->rowCount();
+
+        // Per-user pairing codes (migration 004) are removed explicitly too. They
+        // carry ON DELETE CASCADE from both users(id) and stores(id), so this is
+        // belt-and-braces -- but the row count is reported back to the admin, and
+        // relying on the cascade made that number impossible to state honestly.
+        $st = $this->db->prepare('DELETE FROM platform_user_pairings WHERE store_id = ? OR user_id IN (SELECT id FROM users WHERE store_id = ?)');
+        $st->execute([$storeId, $storeId]);
+        $out['user_pairings'] = $st->rowCount();
 
         foreach (['users', 'settings', 'categories'] as $table) {
             // `key` is a reserved word in MySQL but not PostgreSQL; the platform

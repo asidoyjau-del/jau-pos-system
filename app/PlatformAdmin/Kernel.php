@@ -33,6 +33,17 @@ final class Kernel
         // and the product share one brand. Copied from /assets so the isolated
         // /platform-admin router can serve it (no cross-directory file reads).
         'pos-background.webp' => 'image/webp',
+        // The ProCast brand mark — byte-identical copy of /assets/default-logo.png
+        // (the same file the POS login screen and favicon use). The super admin
+        // portal has no per-store branding, so this is THE logo rather than a
+        // fallback, hence the platform-specific name.
+        'procast-logo.png' => 'image/png',
+        // Light/dark theme bootstrap. It MUST be a separate file rather than an
+        // inline <script> in <head>: the portal CSP is `script-src 'self'` with no
+        // 'unsafe-inline' and no nonce, so an inline script would be blocked. It is
+        // loaded synchronously before the stylesheet so the stored theme is applied
+        // before first paint and the portal never flashes dark-then-light.
+        'theme.js' => 'application/javascript; charset=utf-8',
     ];
 
     private ?PDO $pdo = null;
@@ -176,7 +187,13 @@ final class Kernel
 
     private function assetName(Request $req): ?string
     {
-        if ($req->method === 'GET' && $req->path !== null && preg_match('#^/assets/([a-z0-9.]+)$#', $req->path, $m) && isset(self::ASSETS[$m[1]])) {
+        // The character class must allow '-' as well as [a-z0-9.]: both
+        // pos-background.webp and procast-logo.png are whitelisted, but with the
+        // hyphen excluded the pattern silently failed to match them and they 404'd
+        // even though they were listed here. Only [a-z0-9.-] is accepted, so no
+        // path separator, space or encoded traversal can ever reach the whitelist
+        // lookup, and a name still has to be a literal ASSETS key.
+        if ($req->method === 'GET' && $req->path !== null && preg_match('#^/assets/([a-z0-9.-]+)$#', $req->path, $m) && isset(self::ASSETS[$m[1]])) {
             return $m[1];
         }
         return null;
