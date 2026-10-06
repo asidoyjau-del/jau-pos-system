@@ -82,7 +82,7 @@ define('DB_PASS', getenv('DB_PASS') ?: '');
 // installDB()'s ~100 statements need to actually run again. Forgetting to
 // bump this after adding new schema changes means those changes won't take
 // effect on an already-deployed database until this number goes up.
-define('SCHEMA_VERSION', 9);
+define('SCHEMA_VERSION', 10);
 
 // ── BREVO CONFIG (for Forgot Password emails) ──
 // Reads from server environment variables (Render Dashboard -> Environment) or local .env
@@ -745,6 +745,54 @@ function lastInsertedId(PDO $pdo): int
     return (int)$pdo->query('SELECT LASTVAL()')->fetchColumn();
 }
 
+/**
+ * Mints the stable per-product identity stored in products.cloud_uid.
+ * Mirrors the identical helper in the offline deployment so a uid minted at a
+ * till and a uid minted online are indistinguishable in format.
+ */
+function newCloudUid(): string
+{
+    try {
+        return bin2hex(random_bytes(16));
+    } catch (\Throwable $e) {
+        return substr(md5(uniqid('', true) . microtime(true)), 0, 32);
+    }
+}
+
+/**
+ * Returns the next fefo_seq for a product -- this lot's position in the shared
+ * consumption order. Mirrors the offline deployment exactly; see the copy there
+ * for why this must stay in step between the two files.
+ */
+function nextFefoSeq(PDO $db, int $productId): int
+{
+    $st = $db->prepare("SELECT COALESCE(MAX(fefo_seq), 0) AS m, COALESCE(MAX(id), 0) AS i FROM batches WHERE product_id = ?");
+    $st->execute([$productId]);
+    $row = $st->fetch(PDO::FETCH_ASSOC) ?: ['m' => 0, 'i' => 0];
+    return max((int)($row['m'] ?? 0), (int)($row['i'] ?? 0)) + 1;
+}
+
+// Portable warehouse-stock upsert. Declared here as well as on the local system
+// because the sync push writes this table too, and the deployment may be running
+// on either MySQL or PostgreSQL.
+function ensureWarehouseStock(PDO $db, int $pid): void
+{
+    if ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
+        $db->prepare("INSERT IGNORE INTO warehouse_stock (product_id,quantity) VALUES (?,0)")->execute([$pid]);
+    } else {
+        $db->prepare("INSERT INTO warehouse_stock (product_id,quantity) VALUES (?,0) ON CONFLICT (product_id) DO NOTHING")->execute([$pid]);
+    }
+}
+
+function setWarehouseStock(PDO $db, int $pid, int $qty): void
+{
+    if ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
+        $db->prepare("INSERT INTO warehouse_stock (product_id,quantity) VALUES (?,?) ON DUPLICATE KEY UPDATE quantity=VALUES(quantity)")->execute([$pid, $qty]);
+    } else {
+        $db->prepare("INSERT INTO warehouse_stock (product_id,quantity) VALUES (?,?) ON CONFLICT (product_id) DO UPDATE SET quantity=EXCLUDED.quantity")->execute([$pid, $qty]);
+    }
+}
+
 // ── BREVO TRANSACTIONAL EMAIL ──
 function sendResetEmail(string $toEmail, string $toName, string $resetLink): array
 {
@@ -1031,6 +1079,13 @@ function installDB(): void
         FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
         FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
     )");
+    // Products created AT THE TILL arrive here with a cloud_uid they minted
+    // themselves. It is the one identity that survives a product that has no
+    // barcode and has never synced before, so the push can find the same row
+    // again on a retry instead of inserting a duplicate.
+    try {
+        $db->exec("ALTER TABLE products ADD COLUMN cloud_uid VARCHAR(64) NULL");
+    } catch (\Throwable $e) {}
     $db->exec("CREATE TABLE IF NOT EXISTS settings (
         key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL
     )");
@@ -1450,6 +1505,28 @@ function installDB(): void
     } catch (Exception $e) {
     }
 
+    // ── CROSS-INSTALL LOT IDENTITY + DETERMINISTIC FEFO ORDER (sync redesign) ──
+    // Mirrors the offline deployment exactly. batch_uid identifies a physical lot
+    // across installs; fefo_seq gives every install the same tie-break order so
+    // FEFO consumption picks the SAME lot on both sides (local created_at/id
+    // values differ per install and produced divergent cost/expiry attribution).
+    try {
+        $db->exec("ALTER TABLE deliveries ADD COLUMN cloud_uid VARCHAR(64) NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE batches ADD COLUMN batch_uid VARCHAR(64) NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE batches ADD COLUMN fefo_seq INT NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_batches_fefo_seq ON batches (product_id, fefo_seq)");
+    } catch (Exception $e) {
+    }
+
     // ── One-time migration: everything that exists today becomes "Store #1",
     // owned by whichever user is the oldest 'owner' account (your existing
     // admin). Only rows with store_id still NULL are touched, so this is
@@ -1648,6 +1725,93 @@ function requireLogin(): void
         header('Location: ?page=login');
         exit;
     }
+    // A Super Admin can suspend a store while its cashiers are already signed
+    // in. PHP sessions live in server-side files that nothing here can reach
+    // from the platform-admin app, so the session itself has to be re-checked
+    // against the store status on every guarded request. This is the single
+    // choke point the whole online site and the ProCast App funnel through.
+    enforceStoreStanding((int)($_SESSION['store_id'] ?? 1));
+}
+
+/**
+ * Signs the current session out when its store is no longer 'active', and shows
+ * the merchant a professional blocked screen instead of a bare redirect.
+ *
+ * Deliberately fails OPEN when the platform lifecycle columns are absent (a POS
+ * schema from before the platform migrations) so an un-migrated install is never
+ * bricked; it fails CLOSED the moment the status column exists, which is what
+ * makes a suspension actually take effect.
+ */
+function enforceStoreStanding(int $storeId): void
+{
+    if (empty($_SESSION['uid'])) {
+        return;
+    }
+    static $checked = [];
+    if (isset($checked[$storeId])) {
+        return;
+    }
+    $checked[$storeId] = true;
+    try {
+        $st = db()->prepare("SELECT status, rejection_reason FROM stores WHERE id=? LIMIT 1");
+        $st->execute([$storeId]);
+        $row = $st->fetch();
+    } catch (\Throwable $e) {
+        return; // pre-migration schema: nothing to enforce
+    }
+    if (!$row) {
+        return;
+    }
+    $status = (string)($row['status'] ?? 'active');
+    if ($status === 'active' || $status === '') {
+        return;
+    }
+    renderAccessRevoked($status, (string)($row['rejection_reason'] ?? ''));
+}
+
+/** Clears the session + remember cookie, then renders the blocked screen and stops. */
+function renderAccessRevoked(string $status, string $reason): void
+{
+    $isSuspended = ($status === 'suspended');
+    $_SESSION = [];
+    session_regenerate_id(true);
+    clearAuthToken();
+
+    http_response_code(403);
+    $heading = $isSuspended ? 'Your ProCast account has been suspended' : 'Your ProCast account is no longer active';
+    $detail  = $isSuspended
+        ? 'Access to the online system, the local POS and the ProCast App has been paused by the store administrator.'
+        : 'This store is not currently active on ProCast, so access has been paused by the store administrator.';
+    $help    = $isSuspended
+        ? 'To restore access, contact your store administrator or ProCast support.'
+        : 'Please contact your store administrator or ProCast support for the current status of this store.';
+    $reasonHtml = '';
+    if (trim($reason) !== '' && trim($reason) !== 'Not given') {
+        $reasonHtml = '<p style="margin:0 0 4px;font-size:.72rem;letter-spacing:.09em;text-transform:uppercase;color:#94a3b8;">Reason on record</p>'
+            . '<p style="margin:0;color:#e2e8f0;font-size:.95rem;line-height:1.55;">' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8') . '</p>';
+    }
+    echo '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        . '<title>' . htmlspecialchars($heading, ENT_QUOTES, 'UTF-8') . ' — ProCast</title>'
+        . '<link rel="stylesheet" href="assets/style.css"></head>'
+        . '<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+        . 'padding:24px;background:#0b1120;color:#f8fafc;font-family:system-ui,-apple-system,\'Segoe UI\',Roboto,sans-serif;">'
+        . '<main style="width:100%;max-width:520px;background:#111827;border:1px solid #1f2937;border-radius:16px;'
+        . 'padding:36px 32px;box-shadow:0 24px 60px rgba(0,0,0,.45);text-align:center;">'
+        . '<div style="width:64px;height:64px;margin:0 auto 20px;border-radius:999px;display:flex;align-items:center;'
+        . 'justify-content:center;background:' . ($isSuspended ? 'rgba(245,158,11,.14)' : 'rgba(239,68,68,.14)') . ';'
+        . 'border:1px solid ' . ($isSuspended ? 'rgba(245,158,11,.35)' : 'rgba(239,68,68,.35)') . ';'
+        . 'color:' . ($isSuspended ? '#fbbf24' : '#f87171') . ';font-size:30px;font-weight:700;">'
+        . ($isSuspended ? '&#10073;' : '&#10005;') . '</div>'
+        . '<h1 style="margin:0 0 12px;font-size:1.35rem;line-height:1.35;font-weight:700;">' . htmlspecialchars($heading, ENT_QUOTES, 'UTF-8') . '</h1>'
+        . '<p style="margin:0 0 18px;color:#cbd5e1;font-size:.98rem;line-height:1.6;">' . htmlspecialchars($detail, ENT_QUOTES, 'UTF-8') . '</p>'
+        . '<div style="margin:0 0 20px;padding:14px 16px;background:#0b1120;border:1px solid #1f2937;border-radius:10px;text-align:left;">'
+        . $reasonHtml . '</div>'
+        . '<p style="margin:0 0 22px;color:#94a3b8;font-size:.9rem;line-height:1.6;">' . htmlspecialchars($help, ENT_QUOTES, 'UTF-8') . '</p>'
+        . '<a href="?page=login" style="display:inline-block;padding:11px 22px;border-radius:9px;background:#2563eb;color:#fff;'
+        . 'text-decoration:none;font-weight:600;font-size:.92rem;">Return to sign in</a>'
+        . '</main></body></html>';
+    exit;
 }
 
 // ── PERSISTENT LOGIN ("stay signed in" remember token) ──
@@ -1699,6 +1863,16 @@ function restoreLoginFromCookie(): void
         $st->execute([hash('sha256', $token)]);
         $row = $st->fetch();
         if (!$row) return;
+        // Suspend deletes this store's auth_tokens, so the lookup above already
+        // fails. This guards the race where a token row is minted again (or a
+        // reactivate/suspend lands between the two statements) and makes the
+        // remembered-login path obey the same store status as a fresh sign-in.
+        $sSt = db()->prepare("SELECT status, rejection_reason FROM stores WHERE id=? LIMIT 1");
+        $sSt->execute([(int)($row['store_id'] ?: 1)]);
+        $sRow = $sSt->fetch();
+        if ($sRow && (string)($sRow['status'] ?? 'active') !== 'active') {
+            renderAccessRevoked((string)$sRow['status'], (string)($sRow['rejection_reason'] ?? ''));
+        }
         $_SESSION['uid'] = (int)$row['id'];
         $_SESSION['username'] = $row['username'];
         $_SESSION['full_name'] = $row['full_name'];
@@ -2219,9 +2393,16 @@ function depleteBatchesFEFO(PDO $db, int $productId, int $qty, string $location)
     $consumed = [];
     if ($qty <= 0 || !$productId) return $consumed;
     $col = $location === 'store' ? 'qty_store' : 'qty_warehouse';
+    // MUST stay byte-identical to the offline deployment's depleteBatchesFEFO().
+    // Ordering is part of the sync contract: fefo_seq and batch_uid are shared
+    // across installs, whereas the previous `created_at, id` tie-break used local
+    // values, so tied expiry dates made each install consume a different lot and
+    // silently diverge on cost_price/expiry attribution.
     $stmt = $db->prepare("SELECT id, $col AS avail FROM batches
         WHERE product_id=? AND $col > 0
-        ORDER BY (expiry_date IS NULL) ASC, expiry_date ASC, created_at ASC, id ASC");
+        ORDER BY (expiry_date IS NULL) ASC, expiry_date ASC,
+                 (fefo_seq IS NULL) ASC, fefo_seq ASC,
+                 (batch_uid IS NULL) ASC, batch_uid ASC, id ASC");
     $stmt->execute([$productId]);
     $remaining = $qty;
     foreach ($stmt->fetchAll() as $b) {
@@ -2327,16 +2508,16 @@ function createDeliveryWithBatches(PDO $db, ?string $supplierRef, ?string $event
         $ownedCheck->execute([$pid, $storeId]);
         if (!$ownedCheck->fetch()) continue;
         if (!$deliveryId) {
-            $db->prepare("INSERT INTO deliveries (store_id,supplier_ref,event_date,note,created_by) VALUES (?,?,?,?,?)")
-                ->execute([$storeId, $supplierRef ?: null, $eventDate, $note ?: null, $uid]);
+            $db->prepare("INSERT INTO deliveries (store_id,cloud_uid,supplier_ref,event_date,note,created_by) VALUES (?,?,?,?,?,?)")
+                ->execute([$storeId, newCloudUid(), $supplierRef ?: null, $eventDate, $note ?: null, $uid]);
             $deliveryId = (int)lastInsertedId($db);
         }
         $cost = ($it['cost_price'] ?? '') !== '' ? (float)$it['cost_price'] : null;
         $exp  = $it['expiry_date'] ?? null ?: null;
-        $db->prepare("INSERT INTO batches (delivery_id,product_id,qty_received,qty_warehouse,qty_store,cost_price,expiry_date) VALUES (?,?,?,?,?,?,?)")
-            ->execute([$deliveryId, $pid, $qWh + $qSt, $qWh, $qSt, $cost, $exp]);
+        $db->prepare("INSERT INTO batches (delivery_id,product_id,qty_received,qty_warehouse,qty_store,cost_price,expiry_date,batch_uid,fefo_seq) VALUES (?,?,?,?,?,?,?,?,?)")
+            ->execute([$deliveryId, $pid, $qWh + $qSt, $qWh, $qSt, $cost, $exp, newCloudUid(), nextFefoSeq($db, $pid)]);
         $batchId = (int)lastInsertedId($db);
-        $db->prepare("INSERT INTO warehouse_stock (product_id,quantity) VALUES (?,0) ON CONFLICT (product_id) DO NOTHING")->execute([$pid]);
+        ensureWarehouseStock($db, $pid);
         // Only tag [Warehouse]/[Store] when a single delivery line actually
         // splits across both locations at once (a multi-product delivery
         // where this one item is partly shelved, partly held back) — when
@@ -2422,27 +2603,111 @@ if (isset($_GET['api'])) {
                 //
                 // Single-use by construction: the UPDATE only matches while
                 // used_at IS NULL. Stored as a SHA-256 hash, never plaintext.
-                $code     = preg_replace('/\D/', '', (string)($body['code'] ?? ($_POST['code'] ?? '')));
-                $clientIp = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
-                $nowUtc   = gmdate('Y-m-d H:i:s');
-                $codeHash = hash('sha256', (string)$code);
+                $code      = preg_replace('/\D/', '', (string)($body['code'] ?? ($_POST['code'] ?? '')));
+                $clientIp  = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
+                $nowUtc    = gmdate('Y-m-d H:i:s');
+                $codeHash  = hash('sha256', (string)$code);
+                $deviceKey = substr(trim((string)($body['device'] ?? ($_POST['device'] ?? ''))), 0, 64);
 
                 if (strlen($code) !== 6) {
                     json(false, null, 'Activation code must be exactly 6 digits.');
                 }
 
+                    // Records which machine consumed a code, so a super admin can
+                // tell "one till" from "this code walked the whole building".
+                // Best-effort: an install from before this column simply has no
+                // device trail, which must never block a legitimate redemption.
+                try {
+                    $db->exec('ALTER TABLE platform_user_pairings ADD COLUMN IF NOT EXISTS used_device VARCHAR(64) NULL');
+                } catch (\Throwable $e) {}
+
+                // Brute-force guard. Six digits is only 1,000,000 combinations and
+                // this endpoint is public, so an unthrottled caller could grind
+                // through the space and then use any hit. Failures are counted
+                // per source IP in a small rolling table; the window expires on
+                // its own, so no cleanup job is needed for correctness.
+                //
+                // Counts EVERY attempt, not just failures: a correct code is
+                // consumed immediately anyway, so allowing a burst of hits
+                // costs an attacker nothing and only helps them probe.
+                try {
+                    $db->exec("CREATE TABLE IF NOT EXISTS platform_pairing_attempts (
+                        id         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                        ip_hash    VARCHAR(64) NOT NULL,
+                        tried_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )");
+                    $db->exec("CREATE INDEX IF NOT EXISTS platform_pairing_attempts_ip_idx
+                                 ON platform_pairing_attempts (ip_hash, tried_at)");
+
+                    $ipHash  = hash('sha256', $clientIp);
+                    $since   = gmdate('Y-m-d H:i:s', time() - 900);
+                    $cnt     = $db->prepare('SELECT COUNT(*) FROM platform_pairing_attempts WHERE ip_hash = ? AND tried_at > ?');
+                    $cnt->execute([$ipHash, $since]);
+                    if ((int)$cnt->fetchColumn() >= 12) {
+                        json(false, null, 'Too many attempts. Wait 15 minutes before trying again.');
+                    }
+                    $db->prepare('INSERT INTO platform_pairing_attempts (ip_hash, tried_at) VALUES (?, ?)')
+                       ->execute([$ipHash, $nowUtc]);
+
+                    // Opportunistic prune so the table cannot grow without bound.
+                    $db->prepare('DELETE FROM platform_pairing_attempts WHERE tried_at < ?')
+                       ->execute([gmdate('Y-m-d H:i:s', time() - 86400)]);
+                } catch (\Throwable $e) {
+                    // Rate limiting must never be the reason a legitimate user is
+                    // locked out of their till. Codes are single-use, so the
+                    // worst case of losing this guard is the 6-digit space being
+                    // slower to grind, not an unauthorised grant.
+                }
+
                 // ── Per-account code (preferred) ──
+                // The claimed username is enforced INSIDE the same atomic UPDATE.
+                // Checking it afterwards would be too late: the UPDATE would have
+                // already set used_at, so someone standing at Ana's till who typed
+                // Ben's code would burn Ben's code and only afterwards be told it
+                // was the wrong account. Matching inside the WHERE clause means a
+                // mismatch matches no rows, so the code stays live for its owner.
+                $claimedUser = mb_strtolower(trim((string)($body['username'] ?? ($_POST['username'] ?? ''))), 'UTF-8');
+                $claimedUser = substr($claimedUser, 0, 100);
+
                 $st = $db->prepare(
                     'UPDATE platform_user_pairings
                         SET used_at = ?, used_ip = ?, code_cipher = NULL
                       WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
+                        AND (? = \'\' OR user_id = (SELECT id FROM users WHERE LOWER(username) = ?))
                    RETURNING user_id'
                 );
-                $st->execute([$nowUtc, $clientIp, $codeHash, $nowUtc]);
+                $st->execute([$nowUtc, $clientIp, $codeHash, $nowUtc, $claimedUser, $claimedUser]);
                 $userId = $st->fetchColumn();
+
+                if (($userId === false || $userId === null) && $claimedUser !== '') {
+                    // Distinguish "someone else's code" from "no such code" so the
+                    // till can say something useful. This is a lookup, not a
+                    // redemption: no row is touched.
+                    $chk = $db->prepare(
+                        'SELECT 1 FROM platform_user_pairings
+                          WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
+                            AND user_id <> (SELECT id FROM users WHERE LOWER(username) = ?)'
+                    );
+                    $chk->execute([$codeHash, $nowUtc, $claimedUser]);
+                    if ($chk->fetchColumn() !== false) {
+                        json(false, null, 'That code belongs to a different account. Ask your administrator for the code issued to ' . $claimedUser . '.');
+                    }
+                }
 
                 if ($userId !== false && $userId !== null) {
                     $userId = (int)$userId;
+                    // Stamp the redeeming device onto the row we just consumed. Deliberately a
+                    // second statement: the single-use race must stay one atomic
+                    // UPDATE, and this is pure audit data that may fail silently
+                    // without affecting whether the code was accepted. Runs only
+                    // now that $userId is known good.
+                    if ($deviceKey !== '') {
+                        try {
+                            $db->prepare('UPDATE platform_user_pairings SET used_device = ? WHERE user_id = ? AND used_at = ?')
+                               ->execute([$deviceKey, $userId, $nowUtc]);
+                        } catch (\Throwable $e) {}
+                    }
+
                     $st = $db->prepare('SELECT id, username, full_name, role, store_id FROM users WHERE id = ?');
                     $st->execute([$userId]);
                     $u = $st->fetch(PDO::FETCH_ASSOC);
@@ -2538,15 +2803,33 @@ if (isset($_GET['api'])) {
                     $sid = (int)($u['store_id'] ?: 1);
                     $storeName = 'Store #' . $sid;
                     $storeCurrency = '₱';
+                    $storeStatus = 'active';
+                    $storeReason = '';
                     try {
-                        $sStmt = $db->prepare("SELECT name, currency FROM stores WHERE id = ?");
+                        $sStmt = $db->prepare("SELECT name, currency, status, rejection_reason FROM stores WHERE id = ?");
                         $sStmt->execute([$sid]);
                         $st = $sStmt->fetch();
                         if ($st) {
                             if (!empty($st['name'])) $storeName = $st['name'];
                             if (!empty($st['currency']) && !str_contains($st['currency'], '?')) $storeCurrency = $st['currency'];
+                            $storeStatus = (string)($st['status'] ?? 'active');
+                            $storeReason = (string)($st['rejection_reason'] ?? '');
                         }
                     } catch (\Throwable $e) {}
+
+                    // A local terminal that signs in against the cloud must be
+                    // refused here, not handed a valid session it will only be
+                    // able to discover is suspended later. The status and the
+                    // reason travel with the response so the terminal can show a
+                    // precise, professional blocked screen.
+                    if ($storeStatus !== '' && $storeStatus !== 'active') {
+                        // json() has no status-code parameter, so the HTTP code
+                        // stays 200 and the client keys off success:false plus the
+                        // message. The terminal maps this onto its blocked screen.
+                        json(false, null, $storeStatus === 'suspended'
+                            ? 'Your ProCast account has been suspended. Contact your store administrator or ProCast support to restore access.'
+                            : 'This store is not currently active on ProCast. Please contact your store administrator or ProCast support.');
+                    }
 
                     json(true, [
                         'user' => [
@@ -2561,7 +2844,9 @@ if (isset($_GET['api'])) {
                         'store' => [
                             'id' => $sid,
                             'name' => $storeName,
-                            'currency' => $storeCurrency
+                            'currency' => $storeCurrency,
+                            'status' => $storeStatus,
+                            'rejection_reason' => $storeReason
                         ]
                     ]);
                 } else {
@@ -2596,7 +2881,7 @@ if (isset($_GET['api'])) {
                             p.pack_qty, p.pack_barcode, p.pack_price,
                             p.case_qty, p.case_barcode, p.case_price,
                             p.low_stock_threshold, p.expiry_date, p.delivery_date,
-                            p.brand, p.supplier, p.category_id, p.store_id,
+                            p.brand, p.supplier, p.category_id, p.store_id, p.updated_at,
                             c.name AS category_name
                         FROM products p
                         LEFT JOIN categories c ON c.id = p.category_id
@@ -2662,8 +2947,11 @@ if (isset($_GET['api'])) {
                 try {
                     if ($filterStoreId > 0) {
                         $bStmt = $db->prepare("
-                            SELECT b.* FROM batches b
+                            SELECT b.*, d.cloud_uid AS delivery_uid, d.supplier_ref,
+                                   d.event_date AS delivery_date, d.note AS delivery_note
+                            FROM batches b
                             JOIN products p ON p.id = b.product_id
+                            LEFT JOIN deliveries d ON d.id = b.delivery_id
                             WHERE p.store_id = ?
                             ORDER BY b.id ASC
                         ");
@@ -2713,6 +3001,49 @@ if (isset($_GET['api'])) {
                     }
                 } catch (\Throwable $e) {}
 
+                // Store identity + LIFECYCLE STATUS for the terminal.
+                //
+                // This was referenced below as $storeInfo but never assigned, so
+                // the pull always shipped 'store' => null and every local terminal
+                // silently kept its own placeholder store row. That is also why a
+                // suspension could never reach an offline till: there was no
+                // channel carrying the status down. Sending it here is what lets
+                // the terminal learn it has been suspended on its next sync.
+                $storeInfo = null;
+                try {
+                    $infoSid = $filterStoreId > 0 ? $filterStoreId : 1;
+                    $iStmt = $db->prepare("SELECT id, name, currency, status, rejection_reason FROM stores WHERE id = ? LIMIT 1");
+                    $iStmt->execute([$infoSid]);
+                    $iRow = $iStmt->fetch();
+                    if ($iRow) {
+                        $storeInfo = [
+                            'id'                => (int)$iRow['id'],
+                            'name'              => (string)($iRow['name'] ?: ('Store #' . $infoSid)),
+                            'currency'          => (string)($iRow['currency'] ?: '₱'),
+                            'status'            => (string)($iRow['status'] ?? 'active'),
+                            'rejection_reason'  => (string)($iRow['rejection_reason'] ?? ''),
+                        ];
+                    }
+                } catch (\Throwable $e) {
+                    // Pre-migration schema without the status columns: still ship
+                    // identity so the terminal names the store correctly.
+                    try {
+                        $infoSid = $filterStoreId > 0 ? $filterStoreId : 1;
+                        $iStmt = $db->prepare("SELECT id, name, currency FROM stores WHERE id = ? LIMIT 1");
+                        $iStmt->execute([$infoSid]);
+                        $iRow = $iStmt->fetch();
+                        if ($iRow) {
+                            $storeInfo = [
+                                'id'               => (int)$iRow['id'],
+                                'name'             => (string)($iRow['name'] ?: ('Store #' . $infoSid)),
+                                'currency'         => (string)($iRow['currency'] ?: '₱'),
+                                'status'           => 'active',
+                                'rejection_reason' => '',
+                            ];
+                        }
+                    } catch (\Throwable $e2) {}
+                }
+
                 json(true, [
                     'store_id'     => $filterStoreId,
                     'store'        => $storeInfo,
@@ -2725,12 +3056,152 @@ if (isset($_GET['api'])) {
             }
 
             if ($action === 'cloud_sync_push') {
-                $txList = $body['transactions'] ?? [];
-                if (empty($txList)) {
-                    json(true, ['synced_count' => 0, 'synced_local_ids' => []]);
+                $payloadStoreId = (int)($body['store_id'] ?? 0);
+
+                // ── PRODUCT CHANGES FROM THE TILL ────────────────────────────
+                // Applied before transactions, because a pushed sale adjusts
+                // stock and must layer on top of the corrected quantities.
+                // Uses explicit MySQL/PostgreSQL handling like the rest of this
+                // file: this endpoint runs on PostgreSQL in production and MySQL
+                // on a local install, and dialect-specific SQL here would abort
+                // the entire push.
+                $appliedIds = [];
+                $idMap = [];
+                $changeList = is_array($body['product_changes'] ?? null) ? $body['product_changes'] : [];
+                foreach ($changeList as $chg) {
+                    try {
+                        $op      = (string)($chg['op'] ?? 'upsert');
+                        $cloudId = isset($chg['cloud_id']) && $chg['cloud_id'] !== '' ? (int)$chg['cloud_id'] : 0;
+                        $prod    = is_array($chg['product'] ?? null) ? $chg['product'] : [];
+                        $chgSid  = $payloadStoreId > 0 ? $payloadStoreId : (int)($prod['store_id'] ?? 1);
+                        $pushUid = trim((string)($chg['cloud_uid'] ?? ($prod['cloud_uid'] ?? '')));
+
+                        // Resolve the online row: cloud_uid first (minted once at
+                        // creation and never changed, so it identifies a product
+                        // even with no barcode and no cloud id yet), then cloud id,
+                        // then barcode (a product created on the till before its
+                        // first pull has no cloud id).
+                        $targetId = 0;
+                        if ($pushUid !== '') {
+                            $t = $db->prepare("SELECT id FROM products WHERE cloud_uid=? AND store_id=?");
+                            $t->execute([$pushUid, $chgSid]);
+                            $targetId = (int)$t->fetchColumn();
+                        }
+                        if ($targetId === 0 && $cloudId > 0) {
+                            $t = $db->prepare("SELECT id FROM products WHERE id=? AND store_id=?");
+                            $t->execute([$cloudId, $chgSid]);
+                            $targetId = (int)$t->fetchColumn();
+                        }
+                        if ($targetId === 0 && !empty($prod['barcode'])) {
+                            $t = $db->prepare("SELECT id FROM products WHERE barcode=? AND store_id=?");
+                            $t->execute([trim((string)$prod['barcode']), $chgSid]);
+                            $targetId = (int)$t->fetchColumn();
+                        }
+
+                        if ($op === 'delete') {
+                            if ($targetId > 0) {
+                                $db->prepare("DELETE FROM warehouse_stock WHERE product_id=?")->execute([$targetId]);
+                                $db->prepare("DELETE FROM products WHERE id=? AND store_id=?")->execute([$targetId, $chgSid]);
+                            }
+                            $appliedIds[] = (int)($chg['outbox_id'] ?? 0);
+                            continue;
+                        }
+                        if (trim((string)($prod['name'] ?? '')) === '') continue;   // nothing usable yet
+                        $num = function ($v) { return (isset($v) && $v !== '' && $v !== null) ? (float)$v : null; };
+                        $cols = [
+                            'name' => trim((string)$prod['name']),
+                            'description' => $prod['description'] ?? null,
+                            'price' => (float)($prod['price'] ?? 0),
+                            'cost_price' => $num($prod['cost_price'] ?? null),
+                            'quantity' => (int)($prod['quantity'] ?? 0),
+                            'store_quantity' => (int)($prod['store_quantity'] ?? ($prod['quantity'] ?? 0)),
+                            'expiry_date' => $prod['expiry_date'] ?? null,
+                            'delivery_date' => $prod['delivery_date'] ?? null,
+                            'barcode' => !empty($prod['barcode']) ? trim((string)$prod['barcode']) : null,
+                            'unit_type' => $prod['unit_type'] ?? 'pcs',
+                            'unit_size' => $prod['unit_size'] ?? null,
+                            'low_stock_threshold' => (int)($prod['low_stock_threshold'] ?? 5),
+                            'brand' => $prod['brand'] ?? null,
+                            'supplier' => $prod['supplier'] ?? null,
+                            'promo_price' => $num($prod['promo_price'] ?? null),
+                            'pack_qty' => isset($prod['pack_qty']) && $prod['pack_qty'] !== '' ? (int)$prod['pack_qty'] : null,
+                            'pack_barcode' => $prod['pack_barcode'] ?? null,
+                            'pack_price' => $num($prod['pack_price'] ?? null),
+                            'case_qty' => isset($prod['case_qty']) && $prod['case_qty'] !== '' ? (int)$prod['case_qty'] : null,
+                            'case_barcode' => $prod['case_barcode'] ?? null,
+                            'case_price' => $num($prod['case_price'] ?? null),
+                        ];
+                        if (isset($prod['image_path']) && $prod['image_path'] !== '') $cols['image_path'] = $prod['image_path'];
+                        if (isset($prod['image_data']) && $prod['image_data'] !== '') $cols['image_data'] = $prod['image_data'];
+
+                        // Map the till's category onto an online category row.
+                        $catId = null;
+                        if (!empty($prod['category_id'])) {
+                            $ct = $db->prepare("SELECT id FROM categories WHERE id=?");
+                            $ct->execute([(int)$prod['category_id']]);
+                            $foundCat = $ct->fetchColumn();
+                            $catId = ($foundCat !== false && $foundCat !== null) ? (int)$foundCat : null;
+                        }
+                        if ($catId === null && !empty($prod['category_name'])) {
+                            $ct = $db->prepare("SELECT id FROM categories WHERE store_id=? AND name=? LIMIT 1");
+                            $ct->execute([$chgSid, (string)$prod['category_name']]);
+                            $foundCat = $ct->fetchColumn();
+                            $catId = ($foundCat !== false && $foundCat !== null) ? (int)$foundCat : null;
+                        }
+                        $cols['category_id'] = $catId;
+
+                        if ($targetId > 0) {
+                            // Adopt the till's uid if this legacy online row never
+                            // got one, so later pushes can match on it directly.
+                            if ($pushUid !== '') { $cols['cloud_uid'] = $pushUid; }
+                            $set = implode(',', array_map(fn($k) => "$k=?", array_keys($cols)));
+                            $vals = array_values($cols);
+                            $vals[] = $targetId;
+                            $vals[] = $chgSid;
+                            $db->prepare("UPDATE products SET $set, updated_at=CURRENT_TIMESTAMP WHERE id=? AND store_id=?")
+                               ->execute($vals);
+                        } else {
+                            $cols['store_id'] = $chgSid;
+                            // Always carry a uid. A retry of this same push then
+                            // finds the row it just created instead of inserting
+                            // a second copy, which is what produced duplicate
+                            // products whenever a push response was lost.
+                            if ($pushUid !== '') { $cols['cloud_uid'] = $pushUid; }
+                            $colList = implode(',', array_keys($cols));
+                            $phList  = implode(',', array_fill(0, count($cols), '?'));
+                            $db->prepare("INSERT INTO products ($colList, created_at, updated_at) VALUES ($phList, NOW(), NOW())")
+                               ->execute(array_values($cols));
+                            $targetId = lastInsertedId($db);
+                        }
+
+                        // Warehouse stock travels with the product so the two
+                        // warehouse tables cannot drift apart.
+                        if ($targetId > 0 && isset($prod['warehouse_quantity']) && $prod['warehouse_quantity'] !== '') {
+                            try { setWarehouseStock($db, $targetId, (int)$prod['warehouse_quantity']); }
+                            catch (\Throwable $wsErr) { error_log('push warehouse_stock: ' . $wsErr->getMessage()); }
+                        }
+
+                        $appliedIds[] = (int)($chg['outbox_id'] ?? 0);
+                        $idMap[] = [
+                            'outbox_id' => (int)($chg['outbox_id'] ?? 0),
+                            'local_product_id' => (int)($chg['local_product_id'] ?? 0),
+                            'cloud_id' => (int)$targetId,
+                        ];
+                    } catch (\Throwable $oneErr) {
+                        error_log('cloud_sync_push product apply error: ' . $oneErr->getMessage());
+                    }
                 }
 
-                $payloadStoreId = (int)($body['store_id'] ?? 0);
+                $txList = $body['transactions'] ?? [];
+                if (empty($txList)) {
+                    json(true, [
+                        'synced_count'     => 0,
+                        'synced_local_ids' => [],
+                        'applied_ids'      => array_values(array_filter($appliedIds)),
+                        'applied_products' => count(array_filter($appliedIds)),
+                    ]);
+                }
+
                 $syncedLocalIds = [];
                 $hasCostCol = false;
                 try {
@@ -2872,6 +3343,32 @@ if (isset($_GET['api'])) {
                                     try {
                                         $updStock->execute([$pQty, $pQty, $pQty, $pSub, $validPId]);
                                     } catch (\Throwable $e) {}
+                                    // Consume the FEFO lots for this sale.
+                                    //
+                                    // This was MISSING, and it is why the two systems
+                                    // disagreed about lot-level stock. The till has
+                                    // always run depleteBatchesFEFO() at checkout, so
+                                    // its batches shrank with every sale while the
+                                    // cloud's stayed at full -- meaning the cloud's
+                                    // batches no longer described the stock that
+                                    // existed. Any later lot sync then wrote those
+                                    // stale balances back over correct ones.
+                                    //
+                                    // Safe to run here precisely BECAUSE ordering is
+                                    // now deterministic (fefo_seq, then batch_uid --
+                                    // both shared) rather than keyed on local
+                                    // created_at/id, so this picks the same lot the
+                                    // till picked and the two converge instead of
+                                    // drifting. The sale is already recorded in
+                                    // transaction_items, so no extra audit row is
+                                    // written here; logBatchOutMovements() is
+                                    // deliberately not called (it exists to record a
+                                    // manual stock-out, which this is not).
+                                    try {
+                                        depleteBatchesFEFO($db, (int)$validPId, $pQty, 'store');
+                                    } catch (\Throwable $e) {
+                                        error_log('push FEFO deplete failed: ' . $e->getMessage());
+                                    }
                                 }
                             }
                         }
@@ -2886,7 +3383,12 @@ if (isset($_GET['api'])) {
 
                 json(true, [
                     'synced_count' => count($syncedLocalIds),
-                    'synced_local_ids' => $syncedLocalIds
+                    'synced_local_ids' => $syncedLocalIds,
+                    // Confirms which queued outbox rows were applied, so the till
+                    // clears exactly those and retries anything unconfirmed.
+                    'applied_ids'  => array_values(array_filter($appliedIds)),
+                    'id_map'       => $idMap,
+                    'applied_products' => count(array_filter($appliedIds)),
                 ]);
             }
         } catch (\Throwable $e) {
@@ -3257,7 +3759,7 @@ if (isset($_GET['api'])) {
                     // mint a fresh code and retry the insert a few times. A barcode the
                     // user explicitly typed or scanned is left alone — colliding with a
                     // REAL duplicate should still be reported, not silently changed.
-                    $insertSql = "INSERT INTO products (store_id,name,description,price,cost_price,quantity,store_quantity,category_id,expiry_date,delivery_date,barcode,pack_qty,pack_barcode,pack_price,case_qty,case_barcode,case_price,auto_convert,low_stock_threshold,brand,supplier,unit_type,unit_size,promo_price,promo_pack_price,promo_case_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                    $insertSql = "INSERT INTO products (store_id,cloud_uid,name,description,price,cost_price,quantity,store_quantity,category_id,expiry_date,delivery_date,barcode,pack_qty,pack_barcode,pack_price,case_qty,case_barcode,case_price,auto_convert,low_stock_threshold,brand,supplier,unit_type,unit_size,promo_price,promo_pack_price,promo_case_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
                     $maxBarcodeAttempts = $barcodeWasProvided ? 1 : 5;
                     $newId = null;
                     for ($attempt = 1; $attempt <= $maxBarcodeAttempts; $attempt++) {
@@ -3267,7 +3769,7 @@ if (isset($_GET['api'])) {
                             // (mirrors how warehouse_quantity already starts at 0 and is only
                             // set by the batch step). Passing $storeQty here too used to double
                             // it, since createDeliveryWithBatches() unconditionally adds it again.
-                            $db->prepare($insertSql)->execute([currentStoreId(), $name, $body['description'] ?? null, $price, $costPrice, 0, 0, $body['category_id'] ?: null, $expiry, $deliveryDate, $barcode, $packQty, $packBarcode, $packPrice, $caseQty, $caseBarcode, $casePrice, $autoConvert, $lowStockThreshold, $brand, $supplier, $unitType, $unitSize, $promoPrice, $promoPackPrice, $promoCasePrice]);
+                            $db->prepare($insertSql)->execute([currentStoreId(), newCloudUid(), $name, $body['description'] ?? null, $price, $costPrice, 0, 0, $body['category_id'] ?: null, $expiry, $deliveryDate, $barcode, $packQty, $packBarcode, $packPrice, $caseQty, $caseBarcode, $casePrice, $autoConvert, $lowStockThreshold, $brand, $supplier, $unitType, $unitSize, $promoPrice, $promoPackPrice, $promoCasePrice]);
                             $newId = lastInsertedId($db);
                             break;
                         } catch (PDOException $e) {
@@ -6043,6 +6545,22 @@ if ($page === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt->execute([$username]);
                     $user = $stmt->fetch();
                     if ($user && password_verify($password, $user['password'])) {
+                        // A suspended store must never be able to open a NEW
+                        // session. The password is correct, so without this the
+                        // only thing that would stop a cashier returning to the
+                        // till is the enforcement inside requireLogin() on the
+                        // NEXT page -- which still let them land on the login
+                        // redirect instead of being told why.
+                        $storeSt = $db->prepare("SELECT status, rejection_reason FROM stores WHERE id=? LIMIT 1");
+                        $storeSt->execute([(int)($user['store_id'] ?: 1)]);
+                        $storeRow = $storeSt->fetch();
+                        if ($storeRow && (string)($storeRow['status'] ?? 'active') !== 'active') {
+                            recordLoginAttempt($db, $username, false);
+                            renderAccessRevoked(
+                                (string)$storeRow['status'],
+                                (string)($storeRow['rejection_reason'] ?? '')
+                            );
+                        }
                         recordLoginAttempt($db, $username, true);
                         // Clear previous session memory and regenerate ID on login
                         $_SESSION = [];
