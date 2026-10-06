@@ -155,6 +155,12 @@ function openModal(cfg, trigger) {
 
     const body = {};
     if (reason) body.reason = reason;
+    // The typed confirmation MUST be posted. The server authorises an
+    // irreversible delete with hash_equals($storeName, $req->input('confirm_text')),
+    // so omitting this field made EVERY delete fail with "Type the exact store
+    // name to confirm" no matter what the admin typed -- the button looked
+    // broken while the store was in fact still in the database.
+    if (needsConfirm) body.confirm_text = typeInput.value.trim();
     const r = await apiPost(cfg.action, body);
     if (r.ok || r.redirected) {
       window.location.href = cfg.redirect || cfg.action.replace(/\/(approve|reject|suspend|reactivate)$/, '');

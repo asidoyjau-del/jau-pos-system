@@ -43,7 +43,7 @@ $clientTypes = [
     <table class="pa-table">
       <thead>
         <tr>
-          <th>Store</th><th>Owner</th><th>Contact</th><th>Client</th><th>Status</th><th>Tier</th><th>Registered</th><th>Actions</th>
+          <th>Store</th><th>Owner</th><th>Contact</th><th>Client</th><th>Status</th><th>Tier</th><th>Registered</th><th class="pa-actions-cell">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -64,8 +64,8 @@ $clientTypes = [
           <td><span class="badge <?= $e($badgeMap[$r['status']] ?? '') ?>"><?= $e($r['status']) ?></span></td>
           <td class="text-muted"><?= $e($r['subscription_tier'] ?? '—') ?></td>
           <td class="text-muted"><?= $e(substr($r['registered_at'] ?? $r['created_at'] ?? '', 0, 10)) ?></td>
-          <td>
-            <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <td class="pa-actions-cell">
+            <div class="pa-actions">
               <a href="/platform-admin/stores/<?= $e($r['id']) ?>" class="btn btn-ghost btn-sm"><?= $ico('eye') ?> View</a>
               <?php if ($r['status'] === 'pending_approval'): ?>
               <button class="btn btn-emerald btn-sm" data-confirm='<?= json_encode([
@@ -75,7 +75,7 @@ $clientTypes = [
                 "btnClass"=> "btn-emerald",
                 "btnLabel"=> "Approve",
                 "redirect"=> "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'> Approve</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('check') ?> Approve</button>
               <button class="btn btn-rose btn-sm" data-confirm='<?= json_encode([
                 "title"        => "Reject store?",
                 "desc"         => "Reject \"" . addslashes($r['name']) . "\". The applicant will be notified.",
@@ -84,18 +84,22 @@ $clientTypes = [
                 "btnClass"     => "btn-rose",
                 "btnLabel"     => "Reject",
                 "redirect"     => "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'> Reject</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('x') ?> Reject</button>
               <?php elseif ($r['status'] === 'active'): ?>
               <button class="btn btn-amber btn-sm" data-confirm='<?= json_encode([
                 "title"        => "Suspend store?",
-                "desc"         => "Suspend \"" . addslashes($r['name']) . "\"? Their API key will be revoked immediately.",
-                "confirmText"  => "SUSPEND",
-                "requireReason"=> true,
+                "desc"         => "Suspend \"" . addslashes($r['name']) . "\"? Every user of this store is signed out of the online site, the local POS and the ProCast app, and their API key is revoked immediately.",
+                // Must match SuperAdminDashboardController::suspend(), which
+                // authorises with hash_equals($storeName, confirm_text). It used
+                // to ask for the literal "SUSPEND" here while the server compared
+                // the store name, so every suspend failed with "Type the exact
+                // store name to confirm" no matter what was typed.
+                "confirmText"  => addslashes($r['name']),
                 "action"       => "/platform-admin/stores/" . $r['id'] . "/suspend",
                 "btnClass"     => "btn-amber",
                 "btnLabel"     => "Suspend",
                 "redirect"     => "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'> Suspend</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('pause') ?> Suspend</button>
               <?php elseif ($r['status'] === 'suspended'): ?>
               <button class="btn btn-emerald btn-sm" data-confirm='<?= json_encode([
                 "title"   => "Reactivate store?",
@@ -104,13 +108,16 @@ $clientTypes = [
                 "btnClass"=> "btn-emerald",
                 "btnLabel"=> "Reactivate",
                 "redirect"=> "/platform-admin/stores",
-              ], JSON_UNESCAPED_UNICODE) ?>'> Reactivate</button>
+              ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('play') ?> Reactivate</button>
               <?php endif; ?>
+              <?php /* No requireReason here: a permanent delete is authorised by
+                     typing the store name, and asking for a written reason on top
+                     of that only produced a dead-end modal. The server still
+                     accepts a reason if one is ever supplied. */ ?>
               <button class="btn btn-rose btn-sm" data-confirm='<?= json_encode([
                 "title"        => "Permanently delete " . $r['name'] . "?",
                 "desc"         => "This erases the store and all of its users for good. Type the store name below to confirm.",
                 "confirmText"  => (string)$r['name'],
-                "requireReason"=> true,
                 "action"       => "/platform-admin/stores/" . $r['id'] . "/delete",
                 "btnClass"     => "btn-rose",
                 "btnLabel"     => "Delete",

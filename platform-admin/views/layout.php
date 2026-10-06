@@ -13,6 +13,13 @@ $navActive = $nav ?? '';
 <meta name="csrf-token" content="<?= $e($csrf ?? '') ?>">
 <meta name="robots" content="noindex,nofollow,noarchive">
 <title><?= $e($title ?? 'ProCast') ?> — ProCast Platform</title>
+<link rel="icon" href="/platform-admin/assets/procast-logo.png" type="image/png">
+<!-- Applies the stored light/dark theme before the first paint, so reloading the
+     portal never flashes the dark default at a light-mode operator. This has to
+     be an external file loaded ahead of the stylesheet, not an inline script:
+     the portal CSP is `script-src 'self'` with no 'unsafe-inline' or nonce, so
+     an inline bootstrap would be blocked outright. -->
+<script src="/platform-admin/assets/theme.js"></script>
 <link rel="stylesheet" href="/platform-admin/assets/admin.css">
 </head>
 <body>
@@ -21,7 +28,8 @@ $navActive = $nav ?? '';
   <aside class="pa-sidebar" role="navigation" aria-label="Admin navigation">
     <div class="pa-logo">
       <div class="pa-logo-mark">
-        <div class="pa-logo-icon"><?= $ico('shield', 'pa-ico-lg') ?></div>
+        <img src="/platform-admin/assets/procast-logo.png" class="pa-logo-img"
+             width="38" height="38" alt="" decoding="async">
         <div>
           <div class="pa-logo-text">ProCast</div>
           <div class="pa-logo-sub">Platform Admin</div>
@@ -56,6 +64,14 @@ $navActive = $nav ?? '';
       <div class="pa-topbar-title"><?= $e($title ?? '') ?></div>
       <div class="pa-topbar-actions">
         <span class="text-muted" id="refresh-ts"></span>
+        <!-- Both icons ship in the markup and CSS picks one (see .pa-theme-toggle),
+             so the button is correct the moment theme.js flips the html class.
+             Each icon shows the theme it switches TO, not the active one. -->
+        <button type="button" class="btn btn-ghost btn-sm pa-theme-toggle" data-theme-toggle
+                aria-pressed="false" aria-label="Switch to light mode" title="Switch to light mode">
+          <span class="pa-theme-icon is-light" aria-hidden="true"><?= $ico('sun') ?></span>
+          <span class="pa-theme-icon is-dark" aria-hidden="true"><?= $ico('moon') ?></span>
+        </button>
         <button id="btn-refresh" class="btn btn-ghost btn-sm" title="Refresh data">
           <span id="refresh-icon"><?= $ico('refresh') ?></span>
         </button>

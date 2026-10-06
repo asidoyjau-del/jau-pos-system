@@ -25,7 +25,62 @@
   --radius-lg:  18px;
   --shadow-card: 0 4px 24px rgba(0,0,0,.45);
   --shadow-glow: 0 0 0 3px rgba(47,127,245,.28);
+  /* Translucent surfaces. These live in their own variables because a single
+     palette swap cannot reach them: the dimmed hero photo and the frosted
+     panels were baked into individual rules as literal rgba() values, so light
+     mode would otherwise keep a dark scrim stretched over a white page. */
+  --veil-a:     rgba(10,22,40,.82);
+  --veil-b:     rgba(10,22,40,.88);
+  --panel:      rgba(17,24,39,.85);
+  --topbar-bg:  rgba(11,15,26,.8);
+  --input-bg:   rgba(255,255,255,.05);
+  --ghost-bg:   rgba(255,255,255,.06);
+  --ghost-bg-hover: rgba(255,255,255,.12);
+  --shadow-lg:  0 24px 80px rgba(0,0,0,.7);
   --transition:  .18s cubic-bezier(.4,0,.2,1);
+}
+
+/* ── LIGHT MODE ─────────────────────────────────────────────────────────────
+   Mirrors the POS light palette (index.php's `html.theme-light`) so the store
+   UI and the super admin portal read as one product. The class is put on <html>
+   before first paint by assets/theme.js and flipped by the toggle button.
+
+   The status hues are re-tuned rather than copied straight across. --accent-h,
+   --amber, --emerald and --rose are used as *text* on the light surfaces, and
+   their dark-mode values (#4da3ff, #f4a024, #3ba55c, #e5484d) sit under the
+   4.5:1 contrast floor on white — #4da3ff especially, since it is the colour of
+   every link. They are darkened here, and the same values still work as the
+   gradient stops behind white button labels. */
+html.theme-light {
+  color-scheme: light;
+  --bg-base:    #eef2f8;
+  --bg-card:    #ffffff;
+  --bg-card2:   #f4f7fc;
+  --bg-sidebar: #ffffff;
+  --border:     #d7e0ee;
+  --text-1:     #16233a;
+  --text-2:     #45607f;
+  --text-3:     #6b7f9b;
+  --accent:     #1f66d0;
+  --accent-h:   #1552b0;
+  --accent-d:   #2f7ff5;
+  --amber:      #b06f00;
+  --emerald:    #1e7a44;
+  --rose:       #c92a2f;
+  --violet:     #6a4bf0;
+  --shadow-card: 0 4px 24px rgba(20,40,80,.08);
+  --shadow-glow: 0 0 0 3px rgba(31,102,208,.22);
+  /* Near-opaque on purpose: the hero photo is a dark image, so a light scrim
+     can only ever wash it out — at this alpha it reads as a faint texture
+     behind the page rather than muddy grey. */
+  --veil-a:     rgba(238,242,248,.9);
+  --veil-b:     rgba(228,235,246,.94);
+  --panel:      rgba(255,255,255,.93);
+  --topbar-bg:  rgba(255,255,255,.86);
+  --input-bg:   #ffffff;
+  --ghost-bg:   rgba(20,40,80,.04);
+  --ghost-bg-hover: rgba(20,40,80,.09);
+  --shadow-lg:  0 24px 80px rgba(20,40,80,.16);
 }
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -38,7 +93,7 @@ body{
   /* Same treatment as the POS .public-auth-bg: dimmed hero photo, fixed so it
      stays put while the tables scroll. */
   background-color:var(--bg-base);
-  background-image:linear-gradient(rgba(10,22,40,.82),rgba(10,22,40,.88)),url('/platform-admin/assets/pos-background.webp');
+  background-image:linear-gradient(var(--veil-a),var(--veil-b)),url('/platform-admin/assets/pos-background.webp');
   background-size:cover;
   background-position:center;
   background-attachment:fixed;
@@ -66,7 +121,7 @@ a:hover{color:var(--text-1)}
 
 /* Main */
 .pa-main{flex:1;display:flex;flex-direction:column;min-width:0}
-.pa-topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;border-bottom:1px solid var(--border);background:rgba(11,15,26,.8);backdrop-filter:blur(12px);position:sticky;top:0;z-index:30}
+.pa-topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;border-bottom:1px solid var(--border);background:var(--topbar-bg);backdrop-filter:blur(12px);position:sticky;top:0;z-index:30}
 .pa-topbar-title{font-size:1.1rem;font-weight:700}
 .pa-topbar-actions{display:flex;align-items:center;gap:12px}
 .pa-content{padding:28px;flex:1}
@@ -99,6 +154,20 @@ a:hover{color:var(--text-1)}
 .pa-table tbody tr:hover{background:rgba(47,127,245,.06)}
 .pa-table .store-name{font-weight:600;color:var(--text-1)}
 
+/* Actions column.
+   The buttons used to sit in an inline `display:flex;flex-wrap:wrap` div, so
+   each row wrapped at a different point and the labels ended up ragged and
+   overlapping the row edge. A fixed-width grid keeps every button the same
+   size and every column on the same vertical centre line, whatever mix of
+   View/Approve/Reject/Suspend/Reactivate/Delete a row happens to need. */
+.pa-table th.pa-actions-cell,
+.pa-table td.pa-actions-cell{white-space:nowrap;width:1%}
+.pa-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;min-width:196px}
+.pa-actions > *{width:100%;justify-content:center}
+/* Single-button rows (e.g. rejected stores) still occupy one clean cell
+   instead of stretching a lone button across the whole column. */
+.pa-actions > *:only-child{grid-column:span 2}
+
 /* Badges */
 .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:100px;font-size:.7rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
 .badge::before{content:'';width:6px;height:6px;border-radius:50%;flex-shrink:0}
@@ -127,14 +196,14 @@ a:hover{color:var(--text-1)}
 .btn-amber:hover:not(:disabled){background:rgba(245,158,11,.35)}
 .btn-rose{background:rgba(244,63,94,.2);color:var(--rose);border:1px solid rgba(244,63,94,.3)}
 .btn-rose:hover:not(:disabled){background:rgba(244,63,94,.35)}
-.btn-ghost{background:rgba(255,255,255,.06);color:var(--text-2)}
-.btn-ghost:hover:not(:disabled){background:rgba(255,255,255,.12);color:var(--text-1)}
+.btn-ghost{background:var(--ghost-bg);color:var(--text-2)}
+.btn-ghost:hover:not(:disabled){background:var(--ghost-bg-hover);color:var(--text-1)}
 .btn-sm{padding:5px 11px;font-size:.75rem}
 
 /* Forms */
 .form-group{margin-bottom:18px}
 .form-label{display:block;font-size:.8rem;font-weight:600;color:var(--text-2);margin-bottom:6px}
-.form-control{width:100%;padding:10px 13px;background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1);font-family:inherit;font-size:.9rem;transition:border-color var(--transition),box-shadow var(--transition)}
+.form-control{width:100%;padding:10px 13px;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1);font-family:inherit;font-size:.9rem;transition:border-color var(--transition),box-shadow var(--transition)}
 .form-control:focus{outline:none;border-color:var(--accent);box-shadow:var(--shadow-glow)}
 .form-control::placeholder{color:var(--text-3)}
 select.form-control option{background:var(--bg-card)}
@@ -152,9 +221,9 @@ textarea.form-control{resize:vertical;min-height:80px}
    this wrapper would paint over it with a flat --bg-base and the brand image
    would be missing on the two pages users see first. */
 .pa-login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;
-  background-image:linear-gradient(rgba(10,22,40,.82),rgba(10,22,40,.88)),url('/platform-admin/assets/pos-background.webp');
+  background-image:linear-gradient(var(--veil-a),var(--veil-b)),url('/platform-admin/assets/pos-background.webp');
   background-size:cover;background-position:center;background-attachment:fixed;padding:24px}
-.pa-login-box{width:100%;max-width:400px;background:rgba(17,24,39,.85);border:1px solid var(--border);border-radius:var(--radius-lg);padding:38px 36px;box-shadow:0 24px 80px rgba(0,0,0,.7);backdrop-filter:blur(20px);animation:slideUp .4s ease}
+.pa-login-box{width:100%;max-width:400px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-lg);padding:38px 36px;box-shadow:var(--shadow-lg);backdrop-filter:blur(20px);animation:slideUp .4s ease}
 @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
 .pa-login-logo{text-align:center;margin-bottom:28px}
 .pa-login-icon{width:56px;height:56px;border-radius:16px;margin:0 auto 14px;background:linear-gradient(135deg,var(--accent),var(--violet));display:flex;align-items:center;justify-content:center;font-size:26px}
@@ -285,10 +354,44 @@ td .copy-btn{padding:5px 9px}
   letter-spacing:.35em;
   text-align:center;
   color:var(--accent-h);
-  background:rgba(0,0,0,.4);
+  background:var(--bg-card2);
   border:1px solid var(--border);
   border-radius:var(--radius-sm);
   padding:14px 10px;
   margin:0;
   user-select:all;
 }
+
+/* ── ProCast brand logo ─────────────────────────────────────────────────────
+   The real circular ProCast mark (platform-admin/assets/procast-logo.png — the
+   same artwork as the POS login screen and favicon), replacing the generic
+   shield glyph so the super admin portal carries the actual brand.
+
+   The mark is a white circular badge, which is why it needs no theme-specific
+   variant: it holds its contrast against the dark navy sidebar and the white
+   light-mode sidebar alike. The white backing is also declared so the rounded
+   corners never show the sidebar through if the PNG gains transparency. */
+.pa-logo-img{
+  width:38px;height:38px;border-radius:50%;
+  display:block;object-fit:cover;flex-shrink:0;
+  background:#fff;
+}
+.pa-login-logo-img{
+  width:96px;height:96px;border-radius:50%;
+  display:block;object-fit:cover;margin:0 auto 6px;
+  background:#fff;
+}
+
+/* ── Light/dark toggle ──────────────────────────────────────────────────────
+   Both icons are always present in the markup and CSS decides which one shows,
+   so the button is already correct the instant <html> gains or loses
+   .theme-light — theme.js only has to flip the class and fix the accessible
+   name. The button offers the theme it switches TO, so it never shows the
+   theme already active. */
+.pa-theme-toggle{display:inline-flex;align-items:center;justify-content:center;padding:6px 9px;line-height:0}
+.pa-theme-icon{display:none;align-items:center;justify-content:center}
+html:not(.theme-light) .pa-theme-toggle .pa-theme-icon.is-light{display:inline-flex}
+html.theme-light     .pa-theme-toggle .pa-theme-icon.is-dark{display:inline-flex}
+/* Login-page placement: pinned to the viewport corner so it stays reachable
+   however short the box is, and kept clear of the centred .pa-login-wrap. */
+.login-theme-toggle{position:fixed;top:16px;right:16px;z-index:50}

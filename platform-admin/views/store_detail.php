@@ -27,7 +27,13 @@ $clientTypes = [
 ];
 $current = (string)($s['client_type'] ?? 'web');
 ?>
-<div style="margin-bottom:18px">
+<?php /* Back link. display:flex matters: .btn is inline-flex, so as an inline-level
+       box it sat on the text baseline and the wrapper's height picked up
+       baseline slack, which left the button visually crowding the card below.
+       As a flex container the wrapper's height is exactly the button's, so the
+       gap is precisely mb-6 (24px) — the same rhythm the cards use between
+       themselves. */ ?>
+<div class="mb-6" style="display:flex">
   <a href="/platform-admin/stores" class="btn btn-ghost btn-sm">&larr; Back to stores</a>
 </div>
 
@@ -69,6 +75,23 @@ $current = (string)($s['client_type'] ?? 'web');
 <div class="pa-card mb-6">
   <div class="pa-card-header"><span class="pa-card-title"><?= $ico('smartphone') ?> How they use ProCast</span></div>
   <div class="pa-card-body">
+    <?php /* The picker belongs at the TOP of the card: it is the control that
+           DRIVES the three explanation tiles below it, so you choose first and
+           then read what your choice means. The Save button stays down at the
+           bottom with the rest of the row. One form now spans both positions —
+           HTML allows that because <select form="..."> joins a form by id
+           instead of by being a DOM descendant of it. Both the select and the
+           csrf token are therefore submitted together, exactly as before. */ ?>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+      <label class="form-label" for="client-type-select" style="margin:0">Client type</label>
+      <select name="client_type" id="client-type-select" form="client-type-form"
+              class="form-control" style="width:180px">
+        <?php foreach ($clientTypes as $key => [$label]): ?>
+        <option value="<?= $e($key) ?>" <?= $current === $key ? 'selected' : '' ?>><?= $e($label) ?></option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+
     <div class="grid-2">
       <?php foreach ($clientTypes as $key => [$label, $icon, $help]): ?>
       <div style="display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid <?= $current === $key ? 'var(--accent)' : 'var(--border)' ?>;border-radius:var(--radius-sm);background:<?= $current === $key ? 'rgba(47,127,245,.08)' : 'transparent' ?>">
@@ -81,15 +104,11 @@ $current = (string)($s['client_type'] ?? 'web');
       <?php endforeach; ?>
     </div>
 
-    <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/client-type"
+    <?php /* Save stays at the bottom. The id here is what the <select> at the top
+           of this card binds to via its form="..." attribute. */ ?>
+    <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/client-type" id="client-type-form"
           style="display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap">
       <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
-      <label class="form-label" for="client-type-select" style="margin:0">Client type</label>
-      <select name="client_type" id="client-type-select" class="form-control" style="width:180px">
-        <?php foreach ($clientTypes as $key => [$label]): ?>
-        <option value="<?= $e($key) ?>" <?= $current === $key ? 'selected' : '' ?>><?= $e($label) ?></option>
-        <?php endforeach; ?>
-      </select>
       <button type="submit" class="btn btn-primary btn-sm">Save</button>
     </form>
   </div>
@@ -115,9 +134,10 @@ $current = (string)($s['client_type'] ?? 'web');
   </div>
   <div class="pa-card-body">
     <p class="text-muted" style="margin-bottom:14px">
-      Every person who uses the offline POS needs to be activated. The quickest route
-      is the single code below &mdash; it activates every account at once. Use a
-      per-person code here only if you want to hold someone back specifically.
+      Every person who uses the offline POS needs their own code, issued to their
+      own username. A code unlocks <strong>only that account</strong>, and
+      <strong>only on the computer it was entered on</strong> &mdash; a cashier
+      cannot sign in with a colleague's code, and a new laptop needs a fresh code.
     </p>
 
     <?php if (empty($team)): ?>
@@ -158,19 +178,18 @@ $current = (string)($s['client_type'] ?? 'web');
               <?php endif; ?>
             </td>
             <td>
-              <?php /* The code, printed right next to the person it activates so the
-                     admin never has to scroll to another card or re-open a page to
-                     read it out. Same shared whole-store code on every row — it is
-                     valid for each of these accounts. */ ?>
-              <?php if ($liveCodeText !== ''): ?>
-                <div class="font-mono" style="font-size:1.15rem;font-weight:700;letter-spacing:.14em;color:var(--accent-h)"><?= $e($liveCodeText) ?></div>
-                <button type="button" class="btn btn-emerald btn-sm copy-btn" style="margin-top:6px"
-                        data-copy="<?= $e($liveCodeText) ?>"
-                        title="Copy this 6-digit code for <?= $e($t['username']) ?>"><?= $ico('copy') ?> Copy code</button>
-              <?php elseif (!empty($pairings[0]['can_reveal'])): ?>
-                <span class="text-muted" style="font-size:.8rem">Code issued &mdash; use Copy code</span>
+              <?php /* This cell must show THIS person's code state, never the
+                     store-wide one. It used to print $liveCodeText on every row,
+                     so a screen full of rows each displayed the same six digits
+                     and it read as though each person had their own — which is
+                     exactly how one shared code ended up unlocking every account
+                     on a till. A whole-store code names nobody and unlocks
+                     nobody, so it has no business appearing in a per-person
+                     column. Digits are shown on demand via "Copy code". */ ?>
+              <?php if ($live && !$expired): ?>
+                <span class="text-muted" style="font-size:.8rem">Sent &mdash; use &ldquo;Copy code&rdquo;</span>
               <?php else: ?>
-                <span class="text-muted" style="font-size:.8rem">Not shown</span>
+                <span class="text-muted" style="font-size:.8rem">Not issued</span>
               <?php endif; ?>
             </td>
             <td>
@@ -210,19 +229,19 @@ $current = (string)($s['client_type'] ?? 'web');
   </div>
 </div>
 
-<?php /* Whole-install activation. This is now the PRIMARY path: one code covers
-      every account in the store, so the admin mints it once and hands the same
-      digits to anyone setting up a till — no per-person round trip, and nothing
-      depends on the (unreliable) free email tier. */ ?>
+<?php /* Legacy whole-install code (migration 003). It still records that this store
+      runs on local hardware, but it no longer unlocks any account — see the
+      redeem endpoint. Kept visible rather than deleted so an admin holding an
+      old code is told plainly what it does and does not do. */ ?>
 <div class="pa-card mb-6">
-  <div class="pa-card-header"><span class="pa-card-title"><?= $ico('key') ?> One Code — Every Account</span></div>
+  <div class="pa-card-header"><span class="pa-card-title"><?= $ico('key') ?> Store Link Code</span></div>
   <div class="pa-card-body">
-    <p class="text-muted" style="margin-bottom:14px">
-      Generate a single 6-digit code that activates <strong>any account</strong> in
-      <?= $e($s['name']) ?> on a till. Copy it once and give the same code to everyone
-      &mdash; useful when a laptop is reinstalled or a new cashier is added. The code
-      expires after 24&nbsp;hours and only one code is live at a time.
-    </p>
+    <div class="alert alert-info" style="margin-bottom:14px">
+      <strong>This code does not unlock accounts.</strong> It only records that
+      <?= $e($s['name']) ?> runs on a local till &mdash; useful for reporting, and for
+      installs made before per-account codes existed. To let someone actually sign in,
+      issue a code to their own row in the table above.
+    </div>
 
     <?php if (!empty($pairings)): ?>
       <?php $codeRow = $pairings[0]; ?>
@@ -240,7 +259,7 @@ $current = (string)($s['client_type'] ?? 'web');
         <p class="text-muted" style="margin-bottom:12px;font-size:.8rem">
           Issued <?= $e(substr((string)$codeRow['created_at'], 0, 16)) ?> UTC &middot;
           expires <?= $e(substr((string)$codeRow['expires_at'], 0, 16)) ?> UTC &middot;
-          valid for <strong>every account</strong> in this store.
+          unlocks <strong>no account</strong> on its own.
         </p>
       <?php else: ?>
         <?php /* A code IS live, but we cannot read its digits back. Two possible
@@ -264,8 +283,8 @@ $current = (string)($s['client_type'] ?? 'web');
     <button class="btn btn-primary btn-sm" style="margin-top:<?= !empty($pairings) ? '14px' : '0' ?>" data-confirm='<?= json_encode([
       "title"   => !empty($pairings) ? "Replace the live code?" : "Generate a whole-store code?",
       "desc"    => !empty($pairings)
-        ? "A new 6-digit code will be generated for " . addslashes($s['name']) . " and the current one will stop working."
-        : "A single 6-digit code will be generated for " . addslashes($s['name']) . ". Every account in the store can use it.",
+        ? "A new store link code will be generated for " . addslashes($s['name']) . " and the current one will stop working."
+        : "A single store link code will be generated for " . addslashes($s['name']) . ". It records local usage; it does not unlock any account.",
       "action"  => "/platform-admin/stores/" . $s['id'] . "/pairing",
       "btnClass"=> "btn-primary",
       "btnLabel"=> !empty($pairings) ? "Replace code" : "Generate code",
@@ -310,9 +329,11 @@ $current = (string)($s['client_type'] ?? 'web');
     <?php elseif ($s['status'] === 'active'): ?>
       <button class="btn btn-amber" data-confirm='<?= json_encode([
         "title" => "Suspend store?",
-        "desc"  => "Suspending this store will revoke their API key immediately.",
-        "confirmText" => "SUSPEND",
-        "requireReason" => true,
+        "desc"  => "Suspending this store signs out every user from the online site, the local POS and the ProCast app, and revokes their API key immediately.",
+        // Must match SuperAdminDashboardController::suspend(), which authorises
+        // with hash_equals($storeName, confirm_text) -- the literal "SUSPEND"
+        // asked for here could never satisfy it, so suspend always failed.
+        "confirmText" => addslashes($s['name']),
         "action"  => "/platform-admin/stores/" . $s['id'] . "/suspend",
         "btnClass"=> "btn-amber", "btnLabel"=> "Suspend",
         "redirect"=> "/platform-admin/stores",
@@ -343,7 +364,6 @@ $current = (string)($s['client_type'] ?? 'web');
       "title"        => "Permanently delete " . $s['name'] . "?",
       "desc"         => "This erases the store and all of its users for good. Type the store name below to confirm.",
       "confirmText"  => (string)$s['name'],
-      "requireReason"=> true,
       "action"       => "/platform-admin/stores/" . $s['id'] . "/delete",
       "btnClass"     => "btn-rose",
       "btnLabel"     => "Delete permanently",
