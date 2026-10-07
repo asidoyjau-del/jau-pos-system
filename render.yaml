@@ -18,8 +18,13 @@ services:
         sync: false
       - key: BREVO_SENDER_NAME
         value: Pos_System
+      # SYNC_TOKEN is intentionally NOT given a value here. It used to ship with a
+      # hardcoded literal that is published in this repository, which meant anyone
+      # could authenticate as a store. Set it to a random 32+ character value in the
+      # Render Dashboard (Environment), matching the offline till's SYNC_TOKEN.
+      # Generate one with: php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
       - key: SYNC_TOKEN
-        value: procast_sync_key
+        sync: false
       # ── Platform Super Admin ────────────────────────────────────
       - key: APP_ENV
         value: production

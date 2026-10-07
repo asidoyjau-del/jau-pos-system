@@ -78,6 +78,149 @@ define('DATABASE_URL', getenv('DATABASE_URL') ?: '');
 // returns false and every sync endpoint refuses the request instead of
 // guessing.
 define('SYNC_TOKEN', trim((string)getenv('SYNC_TOKEN')));
+
+// Minimum length for a real sync secret. 32 hex chars = 128 bits of entropy,
+// which is what `php -r "echo bin2hex(random_bytes(32));"` produces.
+define('MIN_SYNC_TOKEN_LENGTH', 32);
+
+/**
+ * Is the configured SYNC_TOKEN strong enough to authenticate a sync with?
+ *
+ * Rejects the three configurations that used to look valid:
+ *   - unset / empty        -> the old code silently substituted 'procast_sync_key'
+ *   - literally that value -> published in .env.example, the schema seed and
+ *                             this repository, so it is public knowledge
+ *   - shorter than the minimum -> too weak to be a real secret
+ *
+ * Callers must REFUSE the request when this returns false. There is
+ * deliberately no "fall back to a default" path left anywhere.
+ */
+function syncTokenIsSecure(?string $token = null): bool
+{
+    $t = $token ?? (defined('SYNC_TOKEN') ? (string)SYNC_TOKEN : '');
+    $t = trim($t);
+    if ($t === '' || $t === 'procast_sync_key') {
+        return false;
+    }
+    // Reject unfilled placeholders explicitly. Several of them are longer than
+    // MIN_SYNC_TOKEN_LENGTH, so a length check alone would happily authenticate
+    // against a literal that ships in .env.example.
+    foreach (['REPLACE_WITH', 'PASTE_YOUR', 'YOUR_', 'CHANGE_ME', 'CHANGEME', 'EXAMPLE', 'TODO', 'XXXX'] as $marker) {
+        if (str_contains(strtoupper($t), $marker)) {
+            return false;
+        }
+    }
+    return strlen($t) >= MIN_SYNC_TOKEN_LENGTH;
+}
+
+/**
+ * Confirm the three sync-critical UNIQUE constraints really exist in the database.
+ *
+ * The DDL that creates them is best-effort: on a legacy database with duplicate
+ * cloud_uids the ALTER fails, and until now that failure was swallowed, leaving
+ * the ledger with no uniqueness guarantee and nothing to indicate it. This asks
+ * the engine's own catalogue instead of trusting that the ALTER worked.
+ *
+ * MySQL and PostgreSQL expose index metadata completely differently, so each is
+ * queried the way that engine expects. A missing constraint is reported as a
+ * human-readable problem string; an empty array means all three are present.
+ *
+ * @return string[] One entry per missing constraint.
+ */
+function verifyUidConstraints(PDO $db, string $driver = ''): array
+{
+    if ($driver === '') {
+        try {
+            $driver = (string)$db->getAttribute(PDO::ATTR_DRIVER_NAME);
+        } catch (\Throwable $e) {
+            $driver = '';
+        }
+    }
+
+    $expected = [
+        'deliveries' => 'uniq_deliveries_cloud_uid',
+        'batches'   => 'uniq_batches_batch_uid_product',
+        'warehouse' => 'uniq_warehouse_cloud_uid',
+    ];
+
+    $missing = [];
+    foreach ($expected as $table => $constraint) {
+        $found = false;
+        try {
+            if ($driver === 'mysql') {
+                // information_schema is reliable across MySQL/MariaDB versions and
+                // unlike SHOW INDEX cannot emit a warning-as-error on some hosts.
+                $st = $db->prepare(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS
+                      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?"
+                );
+                $st->execute([$table, $constraint]);
+                $found = ((int)$st->fetchColumn()) > 0;
+            } elseif ($driver === 'pgsql') {
+                $st = $db->prepare(
+                    "SELECT COUNT(*) FROM pg_constraint
+                      WHERE conrelid = to_regclass(?) AND conname = ? AND contype = 'u'"
+                );
+                $st->execute([$table, $constraint]);
+                $found = ((int)$st->fetchColumn()) > 0;
+            } else {
+                // Unknown dialect (e.g. SQLite): fall back to attempting a probe
+                // query that would fail if the constraint were absent.
+                try {
+                    $db->query("SELECT 1 FROM {$table} LIMIT 1");
+                    $found = true;   // cannot introspect; do not raise a false alarm
+                } catch (\Throwable $e) {
+                    $found = false;
+                }
+            }
+        } catch (\Throwable $e) {
+            // Introspection itself failed (missing privilege, locked catalogue).
+            // Report it rather than implying the constraint is fine.
+            $missing[] = $table . '.' . $constraint . ' (could not verify: ' . $e->getMessage() . ')';
+            continue;
+        }
+
+        if (!$found) {
+            $missing[] = $table . '.' . $constraint;
+        }
+    }
+    return $missing;
+}
+
+/**
+ * Operator-facing schema health summary: which sync constraints are missing.
+ * Used by the Diagnostics surface so a missing constraint is visible in the UI
+ * rather than only in a log file nobody reads.
+ *
+ * @return array{ok:bool, missing:string[], message:?string}
+ */
+function schemaConstraintHealth(PDO $db, string $driver = ''): array
+{
+    $missing = verifyUidConstraints($db, $driver);
+    return [
+        'ok'      => empty($missing),
+        'missing' => $missing,
+        'message' => empty($missing)
+            ? null
+            : 'Missing sync uniqueness constraint(s): ' . implode(', ', $missing)
+             . '. Sync replay protection is NOT active. This usually means a legacy '
+             . 'database contains duplicate cloud_uid values that block the index — '
+             . 'de-duplicate them, then reload this page.',
+    ];
+}
+
+/**
+ * Operator-facing explanation for a disabled sync. Actionable on purpose --
+ * this is the difference between "sync is broken" and "here is the one line to
+ * change, here is how to generate a value".
+ */
+function syncTokenConfigMessage(): string
+{
+    return 'Sync is disabled: SYNC_TOKEN is not securely configured on this server. '
+         . 'Set SYNC_TOKEN in the environment (Render Dashboard -> Environment) to a random '
+         . 'string of at least ' . MIN_SYNC_TOKEN_LENGTH . ' characters, then redeploy. '
+         . 'Generate one with: php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"';
+}
 define('DB_HOST', getenv('DB_HOST') ?: '');
 define('DB_PORT', getenv('DB_PORT') ?: '5432');
 define('DB_NAME', getenv('DB_NAME') ?: '');
@@ -1862,6 +2005,7 @@ function installDB(): void
         $uidDriverCloud = (string)$db->getAttribute(PDO::ATTR_DRIVER_NAME);
     } catch (Exception $e) {
     }
+    $uidDdlErrorsCloud = [];
     foreach ([
         'deliveries' => 'uniq_deliveries_cloud_uid',
         'batches'   => 'uniq_batches_batch_uid_product',
@@ -1881,7 +2025,20 @@ function installDB(): void
             } else {
                 $db->exec("ALTER TABLE {$uidTableCloud} ADD CONSTRAINT {$uidConstraintCloud} UNIQUE ({$uidColsCloud})");
             }
-        } catch (Exception $e) { /* already unique, or legacy dupes block it */ }
+        } catch (Exception $e) {
+            // Previously swallowed. A legacy database holding duplicate cloud_uids makes
+            // this ALTER fail, leaving NO uniqueness guarantee with nothing to show it.
+            $uidDdlErrorsCloud[] = $uidTableCloud . '.' . $uidConstraintCloud . ': ' . $e->getMessage();
+        }
+    }
+
+    // Verify rather than assume: the parity tests only assert the constraint NAME is
+    // present in the source, never that the index exists in the database.
+    foreach (verifyUidConstraints($db, $uidDriverCloud) as $uidIssueCloud) {
+        error_log('[schema] MISSING sync constraint: ' . $uidIssueCloud);
+    }
+    if (!empty($uidDdlErrorsCloud)) {
+        error_log('[schema] Constraint DDL reported errors (legacy duplicates are the usual cause): ' . implode(' | ', $uidDdlErrorsCloud));
     }
 
     // Settings move from one global row per key to one row per (store_id,key)
@@ -1941,8 +2098,15 @@ function installDB(): void
 }
 
 // ── JSON RESPONSE ──
-function json(bool $ok, $data = null, string $err = ''): void
+// $status is optional and defaults to 200 so every existing call site keeps
+// working unchanged. It exists because the sync auth gate needs to distinguish
+// 401 (bad token) from 503 (token not configured server-side), and a monitor or
+// proxy cannot tell those apart from the body alone.
+function json(bool $ok, $data = null, string $err = '', int $status = 200): void
 {
+    if ($status !== 200) {
+        http_response_code($status);
+    }
     header('Content-Type: application/json');
     // Every API response is dynamic/session-specific data (categories,
     // products, stats, etc.) — it must never be served from a stale cache
@@ -2796,13 +2960,38 @@ if (isset($_GET['api'])) {
     // Allows local POS systems to sync data bidirectionally with this online deployment
     // over HTTPS without needing user session cookies or CSRF tokens.
     if (in_array($action, ['cloud_sync_ping', 'cloud_sync_pull', 'cloud_sync_push', 'cloud_auth_login', 'cloud_pair_redeem', 'cloud_pair_request'], true)) {
-        $headerToken = $_SERVER['HTTP_X_SYNC_TOKEN'] ?? '';
-        $queryToken = $_GET['sync_token'] ?? ($_POST['sync_token'] ?? '');
-        $providedToken = trim((string)($headerToken !== '' ? $headerToken : $queryToken));
-        $expectedToken = defined('SYNC_TOKEN') ? SYNC_TOKEN : 'procast_sync_key';
+        // ── Fail closed BEFORE comparing anything ──
+        // If SYNC_TOKEN is unset or still the published default there is no
+        // secret to check against. Previously the expected value fell back to
+        // 'procast_sync_key', which meant an unconfigured server accepted that
+        // exact string from anyone who had read this repository. Refuse the
+        // whole endpoint set instead.
+        if (!syncTokenIsSecure()) {
+            error_log('[sync-auth] Sync token not securely configured; refusing sync endpoint: ' . $action);
+            json(false, null, syncTokenConfigMessage(), 503);
+        }
 
-        if (empty($providedToken) || !hash_equals($expectedToken, $providedToken)) {
-            json(false, null, 'Unauthorized sync request: Invalid or missing sync token.');
+        // ── Header-only authentication (T-03) ──
+        // The token used to be accepted from ?sync_token= / POST, which put a
+        // live shared secret into web server access logs, proxy logs, browser
+        // history and Referer headers. Only the header is honoured now. A
+        // query-string token is rejected explicitly rather than silently
+        // ignored, so an old till sees a clear message instead of a bare 401.
+        $headerToken = trim((string)($_SERVER['HTTP_X_SYNC_TOKEN'] ?? ''));
+        $legacyToken = trim((string)($_GET['sync_token'] ?? ($_POST['sync_token'] ?? '')));
+
+        // Rejected whenever it is present, NOT only when the header is missing.
+        // A caller that also sent a correct X-Sync-Token has already leaked the
+        // secret into web-server access logs, proxy logs and Referer headers.
+        // Honouring the header in that case would silently bless the leak, so
+        // the whole request fails and the till build gets fixed.
+        if ($legacyToken !== '') {
+            error_log('[sync-auth] Rejected sync_token supplied via query string or POST body; use the X-Sync-Token header.');
+            json(false, null, 'Unauthorized sync request: send the sync token in the X-Sync-Token header, not the URL.', 401);
+        }
+
+        if ($headerToken === '' || !hash_equals((string)SYNC_TOKEN, $headerToken)) {
+            json(false, null, 'Unauthorized sync request: Invalid or missing sync token.', 401);
         }
 
         try {
@@ -3699,15 +3888,24 @@ if (isset($_GET['api'])) {
                     }
                 }
 
-                $txList = $body['transactions'] ?? [];
-                if (empty($txList)) {
-                    json(true, [
-                        'synced_count'     => 0,
-                        'synced_local_ids' => [],
-                        'applied_ids'      => array_values(array_filter($appliedIds)),
-                        'applied_products' => count(array_filter($appliedIds)),
-                    ]);
-                }
+                // NO early return here.
+//
+// This block used to short-circuit as soon as the request carried no
+// `transactions`, which is the case for EVERY delivery-only and movement-only
+// push. Those bodies were then answered immediately and the delivery and
+// stock-movement sections further down -- the code that actually writes them --
+// never ran at all. On the till, pushLocalStockLedgerToCloud() sends deliveries
+// in one request and movements in another, neither carrying `transactions`, so
+// the response always came back with no applied_delivery_ids /
+// applied_movement_ids. The till therefore never marked anything synced and
+// re-sent the same rows forever: deliveries and stock movements never reached
+// the online system on ANY installation, silently, while the sync summary
+// reported zero pushed and no error anywhere.
+//
+// The single response at the end of this handler already carries every field
+// these callers read (applied_ids, id_map, applied_delivery_ids,
+// applied_movement_ids), so falling through is both correct and cheaper.
+$txList = $body['transactions'] ?? [];
 
                 $syncedLocalIds = [];
                 $hasCostCol = false;
@@ -4491,7 +4689,10 @@ if (isset($_GET['api'])) {
                             $newId = lastInsertedId($db);
                             break;
                         } catch (PDOException $e) {
-                            $isDupeBarcode = $e->getCode() === '23505' && str_contains($e->getMessage(), 'uniq_product_store_barcode');
+                            // isUniqueViolation() recognises BOTH engines (PostgreSQL
+                            // SQLSTATE 23505, MySQL 23000 / errno 1062), so this
+                            // self-healing retry is not silently PostgreSQL-only.
+                            $isDupeBarcode = isUniqueViolation($e) && str_contains($e->getMessage(), 'uniq_product_store_barcode');
                             if (!$isDupeBarcode) throw $e; // some other DB error — don't mask it, let the outer catch report it
                             if ($barcodeWasProvided || $attempt >= $maxBarcodeAttempts) {
                                 json(false, null, 'Barcode already exists — try a different one');
@@ -4641,7 +4842,7 @@ if (isset($_GET['api'])) {
                     }
                     json(true, ['ok' => true]);
                 } catch (PDOException $e) {
-                    $isDupeBarcode = $e->getCode() === '23505' && str_contains($e->getMessage(), 'uniq_product_store_barcode');
+                    $isDupeBarcode = isUniqueViolation($e) && str_contains($e->getMessage(), 'uniq_product_store_barcode');
                     if ($isDupeBarcode) {
                         // Say WHICH product already holds that code instead of a dead-end
                         // error — this also surfaces a genuine pre-existing duplicate in
