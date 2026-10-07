@@ -53,9 +53,26 @@ final class SuperAdminAuthController
 
         $envEmail    = Env::superAdminEnvEmail();
         $envPassword = (string)Env::get('SUPERADMIN_PASSWORD', '');
+
+        // A published/placeholder env password is treated as if it were NOT set.
+        // It must not authenticate, and -- critically -- it must not earn the
+        // lockout exemption below: the one account exempt from rate limiting
+        // must never be the one whose credential is public.
+        $envPasswordUsable = Env::superAdminPasswordIsAcceptable($envPassword);
+        $isEnvOwner        = $envEmail !== '' && $envEmail === $email;
+
+        if ($isEnvOwner && !$envPasswordUsable) {
+            error_log('[platform-admin] Owner sign-in refused for ' . $email
+                . ': SUPERADMIN_PASSWORD is empty, under 12 characters, or a published placeholder.');
+            Audit::log($this->db, null, Audit::LOGIN_FAILED, null, $req->ip, $req->userAgent,
+                ['email' => $email, 'stage' => 'env_config']);
+            return $this->loginView($session,
+                'The deployment owner password is not securely configured. '
+                . 'Set a unique SUPERADMIN_PASSWORD of at least 12 characters in the environment.', 503);
+        }
+
         // The account configured in Render owns this deployment. It is exempt
         // from the lockout so a mistyped password can never strand it.
-        $isEnvOwner = $envEmail !== '' && $envEmail === $email;
         $envCredsOk = $isEnvOwner && $envPassword !== '' && hash_equals($envPassword, $password);
 
         if ($this->throttle->isBlocked($req->ip, $email, $now)) {

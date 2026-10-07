@@ -145,6 +145,17 @@ final class Db
                 return;
             }
 
+            // Fails closed. Seeding OR re-syncing from a published placeholder is
+            // doubly bad: on a fresh database it creates a login anyone who has
+            // read this repository can use, and on an existing one it OVERWRITES a
+            // real password with it -- because the branch below rewrites the hash
+            // whenever the env value differs. Refuse before touching any row.
+            if (!Env::superAdminPasswordIsAcceptable($password)) {
+                error_log('[platform-admin] Refusing to seed/sync super admin for ' . $email
+                    . ': SUPERADMIN_PASSWORD is empty, under 12 characters, or a published placeholder.');
+                return;
+            }
+
             $repo = new AdminRepository($pdo);
             $existing = $repo->findByEmail($email);
             if ($existing === null) {

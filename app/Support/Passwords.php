@@ -29,6 +29,16 @@ final class Passwords
     /** Minimum policy for super admins: 12+ chars, mixed classes. Returns error text or null. */
     public static function policyError(string $plain): ?string
     {
+        // A value that ships in the committed .env.example SATISFIED every rule
+        // below (14 chars, all four character classes), which is precisely why
+        // it was a usable credential for anyone who had read the repository.
+        // Length and complexity are not enough on their own -- the password also
+        // has to be one that only this deployment knows. Same fail-closed rule
+        // the sync token is held to.
+        if (!Env::superAdminPasswordIsAcceptable($plain)) {
+            return 'Password is empty, under 12 characters, or a published placeholder. '
+                 . 'Generate a unique one, e.g. php -r "echo bin2hex(random_bytes(12)), PHP_EOL;"';
+        }
         if (strlen($plain) < 12) {
             return 'Password must be at least 12 characters.';
         }

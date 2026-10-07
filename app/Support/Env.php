@@ -70,6 +70,63 @@ final class Env
         return strtolower(trim((string)self::get('SUPERADMIN_EMAIL', '')));
     }
 
+    /**
+     * Passwords that must never be allowed to authenticate a super admin.
+     *
+     * .env.example is a COMMITTED file, so any literal shipped in it is public
+     * knowledge. A deployment still configured with one of these has a platform
+     * admin account that anyone who has read this repository can sign in with --
+     * and that account is deliberately exempt from the brute-force lockout, so
+     * the guess is also unlimited.
+     *
+     * Compared case-insensitively so a trivial case variation is not a bypass.
+     */
+    private const PUBLISHED_SUPER_ADMIN_PASSWORDS = [
+        'ChangeMe_1234!',
+        'ChangeMe1234!',
+        'ChangeMe_1234',
+        'changeme1234',
+        'SuperAdmin123',
+        'superadmin123',
+        'Password123',
+        'password123',
+        'admin123',
+        'changeme',
+        'password',
+    ];
+
+    /**
+     * May this password be used for the platform super admin?
+     *
+     * Fails closed. An empty value, the published example, an unfilled
+     * placeholder or anything under the minimum length is refused, exactly as
+     * syncTokenIsSecure() refuses the published sync token. Unconfigured must
+     * not quietly mean "the value everybody can read".
+     */
+    public static function superAdminPasswordIsAcceptable(?string $password): bool
+    {
+        $p = trim((string)$password);
+        if ($p === '' || strlen($p) < 12) {
+            return false;
+        }
+
+        foreach (self::PUBLISHED_SUPER_ADMIN_PASSWORDS as $published) {
+            if (strtolower($p) === strtolower($published)) {
+                return false;
+            }
+        }
+
+        // Unfilled placeholder markers, e.g. CHANGE_ME / REPLACE_WITH / YOUR_.
+        $upper = strtoupper($p);
+        foreach (['CHANGE', 'REPLACE', 'YOUR_', 'PASTE', 'EXAMPLE', 'TODO', 'XXXX'] as $marker) {
+            if (str_contains($upper, $marker)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /** @return array<string,string> */
     private static function fileValues(): array
     {
