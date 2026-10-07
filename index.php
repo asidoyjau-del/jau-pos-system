@@ -70,7 +70,14 @@ if ($__isHttps) {
 
 // ── DATABASE CONFIG (edit these 4 lines) ──
 define('DATABASE_URL', getenv('DATABASE_URL') ?: '');
-define('SYNC_TOKEN', getenv('SYNC_TOKEN') ?: 'procast_sync_key');
+// Fails closed on purpose. This used to fall back to the literal string
+// 'procast_sync_key', which is published in .env.example and in the schema
+// seed -- so "the operator forgot to configure it" and "anyone on the internet
+// can sync as this store" were the SAME configuration, with no warning either
+// way. An unset SYNC_TOKEN now genuinely means no token: syncTokenIsSecure()
+// returns false and every sync endpoint refuses the request instead of
+// guessing.
+define('SYNC_TOKEN', trim((string)getenv('SYNC_TOKEN')));
 define('DB_HOST', getenv('DB_HOST') ?: '');
 define('DB_PORT', getenv('DB_PORT') ?: '5432');
 define('DB_NAME', getenv('DB_NAME') ?: '');
@@ -746,6 +753,27 @@ function lastInsertedId(PDO $pdo): int
 }
 
 /**
+ * Is this PDOException a unique-constraint violation?
+ *
+ * Byte-identical to the till's copy. The push handler uses it to tell "a
+ * concurrent push already stored this exact event" (benign, acknowledge) apart
+ * from a genuine failure (retry), which is only possible if both engines'
+ * duplicate signals are recognised: PostgreSQL SQLSTATE 23505, and MySQL's
+ * errno 1062/1586 behind a generic HY000 state.
+ */
+function isUniqueViolation(\PDOException $e): bool
+{
+    $info = $e->errorInfo ?? [];
+    $sqlState = (string)($info[0] ?? $e->getCode());
+    $driverCode = (int)($info[1] ?? 0);
+
+    if ($sqlState === '23000' || $sqlState === '23505') { return true; }
+    if ($driverCode === 1062 || $driverCode === 1586) { return true; }
+
+    return (bool)preg_match('/duplicate entry|unique constraint|violates unique/i', $e->getMessage());
+}
+
+/**
  * Mints the stable per-product identity stored in products.cloud_uid.
  * Mirrors the identical helper in the offline deployment so a uid minted at a
  * till and a uid minted online are indistinguishable in format.
@@ -793,7 +821,181 @@ function setWarehouseStock(PDO $db, int $pid, int $qty): void
     }
 }
 
+/**
+ * Appends ONE stock-movement event to the `warehouse` ledger.
+ *
+ * Every stock change in the application funnels through here rather than
+ * writing `INSERT INTO warehouse` at the call site. That is deliberate: a
+ * movement is an immutable EVENT, and the only thing that makes it replayable
+ * is the cloud_uid minted in this one place. A raw INSERT written at a call
+ * site would produce a row with a NULL uid, which no amount of retrying could
+ * ever de-duplicate on the far side -- so one stray raw INSERT would silently
+ * re-appear as a duplicate movement on every subsequent sync.
+ *
+ * Returns the new ledger row id, or 0 if the insert could not be made.
+ *
+ * NOTE: this records the movement ONLY. It never touches products.quantity,
+ * warehouse_stock, or batches -- those are aggregate balances derived from the
+ * ledger, and are updated by the caller that knows the reason. Keeping the
+ * event write separate from the balance write is what lets a re-delivered
+ * movement be recognised and skipped instead of decrementing stock twice.
+ */
+function recordStockMovement(PDO $db, int $productId, int $qtyIn, int $qtyOut, ?string $note = null, ?int $createdBy = null, ?string $eventDate = null, ?int $batchId = null, ?string $supplierRef = null): int
+{
+    try {
+        $ins = $db->prepare(
+            "INSERT INTO warehouse (product_id, qty_in, qty_out, note, created_by, event_date, batch_id, supplier_ref, cloud_uid)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        $ins->execute([
+            $productId,
+            $qtyIn,
+            $qtyOut,
+            $note,
+            $createdBy,
+            $eventDate,
+            $batchId,
+            $supplierRef,
+            newCloudUid(),
+        ]);
+        return lastInsertedId($db);
+    } catch (\Throwable $e) {
+        error_log('recordStockMovement failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+
 // ── BREVO TRANSACTIONAL EMAIL ──
+// Generic Brevo sender shared by the password-reset and activation-code mails.
+// Kept separate from sendResetEmail() because that one is specialised for a
+// reset link; the code mail needs a different subject and body but identical
+// transport, and duplicating the curl block would mean two places to fix when
+// the provider changes.
+function sendBrevoMail(string $toEmail, string $toName, string $subject, string $html): array
+{
+    if (BREVO_API_KEY === 'YOUR_BREVO_API_KEY' || !BREVO_API_KEY) {
+        return [false, 'Brevo API key not configured on the server.'];
+    }
+    if (!BREVO_SENDER_EMAIL) {
+        return [false, 'Brevo sender email not configured on the server (BREVO_SENDER_EMAIL).'];
+    }
+    $data = [
+        'sender'      => ['name' => BREVO_SENDER_NAME, 'email' => BREVO_SENDER_EMAIL],
+        'to'          => [['email' => $toEmail, 'name' => $toName ?: $toEmail]],
+        'subject'     => $subject,
+        'htmlContent' => $html,
+    ];
+    $ch = curl_init('https://api.brevo.com/v3/smtp/email');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'accept: application/json',
+        'api-key: ' . BREVO_API_KEY,
+        'content-type: application/json',
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    $response = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+    if ($httpCode >= 200 && $httpCode < 300) return [true, ''];
+    $msg = $curlErr !== '' ? $curlErr : ('HTTP ' . $httpCode);
+    if ($response) {
+        $decoded = @json_decode($response, true);
+        if (!empty($decoded['message'])) $msg .= ': ' . $decoded['message'];
+    }
+    return [false, substr($msg, 0, 300)];
+}
+
+/**
+ * Appends to the platform audit trail from the public sync surface.
+ *
+ * platform-admin's Audit::log() is unavailable here — this single-file
+ * deployment deliberately does NOT load the PSR-4 autoloader, and pulling it
+ * in just for an INSERT would couple the POS to the admin app. Best-effort on
+ * purpose: losing an audit row must never fail the user's login.
+ */
+function logPairingEvent(PDO $db, string $action, ?int $storeId, string $ip, string $userAgent, array $details = []): void
+{
+    try {
+        $st = $db->prepare(
+            'INSERT INTO platform_audit_logs (super_admin_id, action, target_store_id, ip_address, user_agent, details_json)
+             VALUES (?,?,?,?,?,?)'
+        );
+        $st->execute([
+            null,
+            $action,
+            $storeId,
+            substr($ip, 0, 64),
+            substr($userAgent, 0, 255),
+            json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}',
+        ]);
+    } catch (\Throwable $e) {
+        error_log('pairing audit failed: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Seals a 6-digit code for the admin's re-copy button, or returns null.
+ *
+ * WHY THIS IS DUPLICATED INSTEAD OF CALLING ProCast\Support\Crypto.
+ * This file is a self-contained single-file deployment that deliberately does
+ * NOT load the PSR-4 autoloader (see logPairingEvent() above). Requiring
+ * Bootstrap.php here to reach one class would couple the POS to the admin app
+ * on every request, which is exactly the coupling the single-file layout
+ * exists to avoid. The .env loader at the top of this file already puts the key
+ * in the environment, so nothing else is missing.
+ *
+ * The output format is byte-for-byte what Crypto::encrypt() produces —
+ * 'v1:' . base64(iv . tag . ciphertext), AES-256-GCM, 12-byte IV, 16-byte tag —
+ * so the super admin's Crypto::decrypt() reads these back without knowing they
+ * came from here. That interop is the whole point: if the two ever diverge, the
+ * admin silently loses the ability to reveal auto-issued codes, which is the
+ * only fallback when an email is filtered.
+ *
+ * Best-effort. Returning null leaves the code hash-only and still perfectly
+ * redeemable; only the convenience of re-copying is lost.
+ */
+function sealPairingCode(string $plain): ?string
+{
+    $key = null;
+    foreach (['PLATFORM_ENC_KEY', 'PLATFORM_CRYPTO_KEY'] as $var) {
+        $encoded = trim((string)getenv($var));
+        if ($encoded === '') {
+            continue;
+        }
+        $raw = base64_decode($encoded, true);
+        if ($raw !== false && strlen($raw) === 32) {
+            $key = $raw;
+            break;
+        }
+        if (strlen($encoded) === 32) {
+            $key = $encoded;
+            break;
+        }
+        error_log("cloud_pair_request: {$var} is set but is neither base64 of 32 bytes nor a raw 32-char string; ignoring it.");
+    }
+    if ($key === null) {
+        error_log('cloud_pair_request: no usable encryption key, code stored hash-only.');
+        return null;
+    }
+
+    try {
+        $iv = random_bytes(12);
+        $tag = '';
+        $ct = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+        if ($ct === false) {
+            return null;
+        }
+        return 'v1:' . base64_encode($iv . $tag . $ct);
+    } catch (\Throwable $e) {
+        error_log('cloud_pair_request: could not seal code: ' . $e->getMessage());
+        return null;
+    }
+}
+
 function sendResetEmail(string $toEmail, string $toName, string $resetLink): array
 {
     if (BREVO_API_KEY === 'YOUR_BREVO_API_KEY' || !BREVO_API_KEY) {
@@ -894,6 +1096,7 @@ function installDB(): void
         qty_out INT NOT NULL DEFAULT 0,
         note VARCHAR(255) NULL,
         created_by INT NULL,
+        cloud_uid VARCHAR(64) NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
@@ -1046,6 +1249,15 @@ function installDB(): void
     // batches cover keep working fine with no batch attributed).
     try {
         $db->exec("ALTER TABLE warehouse ADD COLUMN batch_id INT NULL");
+    } catch (Exception $e) {
+    }
+    // Stable identity for a STOCK MOVEMENT event, so a movement can be matched
+    // by identity instead of by (product_id, created_at) -- which is not unique
+    // and made every replay either duplicate the row or lose it. Minted once at
+    // insert time and carried in both directions, so re-applying a movement the
+    // cloud already holds is a no-op rather than a second stock movement.
+    try {
+        $db->exec("ALTER TABLE warehouse ADD COLUMN cloud_uid VARCHAR(64) NULL");
     } catch (Exception $e) {
     }
     $db->exec("CREATE TABLE IF NOT EXISTS transactions (
@@ -1638,6 +1850,38 @@ function installDB(): void
     try {
         $db->exec("ALTER TABLE products ADD CONSTRAINT uniq_product_store_barcode UNIQUE (store_id, barcode)");
     } catch (Exception $e) {
+    }
+
+    // Unique indexes on the synchronised identities of the APPEND-ONLY ledger.
+    // Mirrors the till's constraints exactly. The push handler's SELECT-before-
+    // INSERT duplicate check is advisory and loses to two overlapping pushes;
+    // this index is the part that actually guarantees one row per cloud_uid.
+    // Safe with NULLs, so any number of never-synced rows coexist.
+    $uidDriverCloud = '';
+    try {
+        $uidDriverCloud = (string)$db->getAttribute(PDO::ATTR_DRIVER_NAME);
+    } catch (Exception $e) {
+    }
+    foreach ([
+        'deliveries' => 'uniq_deliveries_cloud_uid',
+        'batches'   => 'uniq_batches_batch_uid_product',
+        'warehouse' => 'uniq_warehouse_cloud_uid',
+    ] as $uidTableCloud => $uidConstraintCloud) {
+        $uidColsCloud = $uidTableCloud === 'batches' ? 'batch_uid, product_id' : 'cloud_uid';
+        try {
+            if ($uidDriverCloud === 'mysql') {
+                $db->exec("DROP INDEX {$uidConstraintCloud} ON {$uidTableCloud}");
+            } else {
+                $db->exec("ALTER TABLE {$uidTableCloud} DROP CONSTRAINT IF EXISTS {$uidConstraintCloud}");
+            }
+        } catch (Exception $e) { /* wasn't there — fine */ }
+        try {
+            if ($uidDriverCloud === 'mysql') {
+                $db->exec("ALTER TABLE {$uidTableCloud} ADD UNIQUE KEY {$uidConstraintCloud} ({$uidColsCloud})");
+            } else {
+                $db->exec("ALTER TABLE {$uidTableCloud} ADD CONSTRAINT {$uidConstraintCloud} UNIQUE ({$uidColsCloud})");
+            }
+        } catch (Exception $e) { /* already unique, or legacy dupes block it */ }
     }
 
     // Settings move from one global row per key to one row per (store_id,key)
@@ -2424,13 +2668,12 @@ function depleteBatchesFEFO(PDO $db, int $productId, int $qty, string $location)
 function logBatchOutMovements(PDO $db, int $productId, int $totalQty, array $consumed, string $note, int $uid, ?string $eventDate = null): void
 {
     $covered = 0;
-    $ins = $db->prepare("INSERT INTO warehouse (product_id,qty_out,note,created_by,event_date,batch_id) VALUES (?,?,?,?,?,?)");
     foreach ($consumed as $c) {
-        $ins->execute([$productId, $c['qty'], $note, $uid, $eventDate, $c['batch_id']]);
-        $covered += $c['qty'];
+        recordStockMovement($db, $productId, 0, (int)$c['qty'], $note, $uid, $eventDate, (int)$c['batch_id'], null);
+        $covered += (int)$c['qty'];
     }
     $leftover = $totalQty - $covered;
-    if ($leftover > 0) $ins->execute([$productId, $leftover, $note, $uid, $eventDate, null]);
+    if ($leftover > 0) recordStockMovement($db, $productId, 0, $leftover, $note, $uid, $eventDate, null, null);
 }
 
 // Recomputes a product's single expiry_date field from its still-open
@@ -2527,13 +2770,11 @@ function createDeliveryWithBatches(PDO $db, ?string $supplierRef, ?string $event
         $dual = $qWh > 0 && $qSt > 0;
         if ($qWh > 0) {
             $db->prepare("UPDATE warehouse_stock SET quantity=quantity+? WHERE product_id=?")->execute([$qWh, $pid]);
-            $db->prepare("INSERT INTO warehouse (product_id,qty_in,note,created_by,supplier_ref,event_date,batch_id) VALUES (?,?,?,?,?,?,?)")
-                ->execute([$pid, $qWh, ($dual ? '[Warehouse] ' : '') . ($note ?: 'Delivery received'), $uid, $supplierRef ?: null, $eventDate, $batchId]);
+            recordStockMovement($db, $pid, $qWh, 0, ($dual ? '[Warehouse] ' : '') . ($note ?: 'Delivery received'), $uid, $eventDate, $batchId, $supplierRef ?: null);
         }
         if ($qSt > 0) {
             $db->prepare("UPDATE products SET quantity=quantity+?,store_quantity=store_quantity+? WHERE id=?")->execute([$qSt, $qSt, $pid]);
-            $db->prepare("INSERT INTO warehouse (product_id,qty_in,note,created_by,supplier_ref,event_date,batch_id) VALUES (?,?,?,?,?,?,?)")
-                ->execute([$pid, $qSt, ($dual ? '[Store] ' : '') . ($note ?: 'Delivery received'), $uid, $supplierRef ?: null, $eventDate, $batchId]);
+            recordStockMovement($db, $pid, $qSt, 0, ($dual ? '[Store] ' : '') . ($note ?: 'Delivery received'), $uid, $eventDate, $batchId, $supplierRef ?: null);
         }
         // Cost only fills a gap (never clobbers a manually-curated value);
         // Delivery Date always advances to the most recent delivery; Expiry
@@ -2554,7 +2795,7 @@ if (isset($_GET['api'])) {
     // ── CLOUD SYNC ENDPOINTS (AUTHENTICATED VIA SYNC_TOKEN) ──
     // Allows local POS systems to sync data bidirectionally with this online deployment
     // over HTTPS without needing user session cookies or CSRF tokens.
-    if (in_array($action, ['cloud_sync_ping', 'cloud_sync_pull', 'cloud_sync_push', 'cloud_auth_login', 'cloud_pair_redeem'], true)) {
+    if (in_array($action, ['cloud_sync_ping', 'cloud_sync_pull', 'cloud_sync_push', 'cloud_auth_login', 'cloud_pair_redeem', 'cloud_pair_request'], true)) {
         $headerToken = $_SERVER['HTTP_X_SYNC_TOKEN'] ?? '';
         $queryToken = $_GET['sync_token'] ?? ($_POST['sync_token'] ?? '');
         $providedToken = trim((string)($headerToken !== '' ? $headerToken : $queryToken));
@@ -2587,6 +2828,234 @@ if (isset($_GET['api'])) {
                     'products_count' => $prodCount,
                     'server_time' => date('Y-m-d H:i:s')
                 ]);
+            }
+
+            if ($action === 'cloud_pair_request') {
+                // Issues and emails a 6-digit activation code for ONE account.
+                //
+                // Called by the local POS when a person reaches the login screen
+                // and finds the till not yet activated. Doing it here rather than
+                // by hand from the admin screen is what makes a new hire usable
+                // on their own: owner and every cashier each get their own code,
+                // tied to their own role, without an admin noticing first.
+                //
+                // ANTI-ENUMERATION. This takes a username and must never reveal
+                // whether it exists. Every response below is byte-identical for
+                // "no such user", "suspended store", "no email on file" and
+                // success — otherwise this is a free account-enumeration oracle:
+                // post names until the answers stop looking alike and you know
+                // who is a customer. Only a rate-limit refusal differs, because
+                // that is keyed on the CALLER, not the target, and leaks nothing
+                // about anyone else's account.
+                $username = mb_strtolower(trim((string)($body['username'] ?? ($_POST['username'] ?? ''))), 'UTF-8');
+                $username = substr($username, 0, 100);
+                $clientIp = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
+                $userAgent = substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+                $nowUtc    = gmdate('Y-m-d H:i:s');
+
+                // The single response every caller sees, whatever really happened.
+                $generic = static function (): void {
+                    json(true, [
+                        'requested' => true,
+                        'message'   => 'If that account exists and is active, an activation code has been sent to its email address.',
+                    ]);
+                };
+
+                if ($username === '') {
+                    $generic();
+                }
+
+                // Rate limit BEFORE any lookup, so an attacker cannot learn
+                // anything by tripping it. Counted per source IP rather than per
+                // account, so rotating usernames does not dodge it.
+                try {
+                    $db->exec("CREATE TABLE IF NOT EXISTS platform_pairing_attempts (
+                        id         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                        ip_hash    VARCHAR(64) NOT NULL,
+                        tried_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )");
+                    $db->exec("CREATE INDEX IF NOT EXISTS platform_pairing_attempts_ip_idx
+                                 ON platform_pairing_attempts (ip_hash, tried_at)");
+
+                    $ipHash = hash('sha256', $clientIp);
+                    $cnt    = $db->prepare('SELECT COUNT(*) FROM platform_pairing_attempts WHERE ip_hash = ? AND tried_at > ?');
+                    $cnt->execute([$ipHash, gmdate('Y-m-d H:i:s', time() - 900)]);
+                    if ((int)$cnt->fetchColumn() >= 8) {
+                        json(false, null, 'Too many requests. Wait a few minutes before trying again.');
+                    }
+                    $db->prepare('INSERT INTO platform_pairing_attempts (ip_hash, tried_at) VALUES (?, ?)')
+                       ->execute([$ipHash, $nowUtc]);
+                    $db->prepare('DELETE FROM platform_pairing_attempts WHERE tried_at < ?')
+                       ->execute([gmdate('Y-m-d H:i:s', time() - 86400)]);
+                } catch (\Throwable $e) {
+                    // As in redemption, a broken limiter must never be why a new
+                    // hire cannot activate. It only makes this cheaper to abuse.
+                }
+
+                // ISSUANCE FLOOR. A code is a credential, so issuance must be
+                // most expensive for the person the code is FOR. Without this,
+                // anyone could trigger a mail to a chosen victim every few
+                // seconds — a working mailbomb against a customer's inbox, and a
+                // way to keep expiring the code the owner is trying to read.
+                try {
+                    $reqStmt = $db->prepare(
+                        'SELECT COUNT(*) FROM platform_audit_logs
+                          WHERE action = ? AND details_json::text LIKE ? AND ip_address = ?
+                            AND created_at > ?'
+                    );
+                    $reqStmt->execute([
+                        'PAIRING_CODE_ISSUED',
+                        '%"scope":"user_request"%',
+                        $clientIp,
+                        gmdate('Y-m-d H:i:s', time() - 3600),
+                    ]);
+                    if ((int)$reqStmt->fetchColumn() >= 5) {
+                        $generic();
+                    }
+                } catch (\Throwable $e) {}
+
+                $uStmt = $db->prepare(
+                    'SELECT id, username, full_name, email, role, store_id FROM users WHERE LOWER(username) = ? LIMIT 1'
+                );
+                $uStmt->execute([$username]);
+                $u = $uStmt->fetch(PDO::FETCH_ASSOC);
+
+                // Unknown account: answer exactly as if it had worked.
+                if (!$u) {
+                    $generic();
+                }
+
+                $sid = (int)($u['store_id'] ?: 0);
+                if ($sid > 0) {
+                    $sStmt = $db->prepare('SELECT name, status FROM stores WHERE id = ?');
+                    $sStmt->execute([$sid]);
+                    $store = $sStmt->fetch(PDO::FETCH_ASSOC);
+                    if (!$store || $store['status'] !== 'active') {
+                        logPairingEvent($db, 'PAIRING_CODE_REQUESTED', $sid, $clientIp, $userAgent, [
+                            'user_id' => (int)$u['id'], 'outcome' => 'store_not_active',
+                        ]);
+                        $generic();
+                    }
+                }
+
+                // No address means no delivery. Minting a code nobody can ever
+                // receive would only expire into a support ticket, so leave these
+                // to the admin screen and say the same generic thing rather than
+                // leaking that they are missing an email.
+                $target = trim((string)($u['email'] ?? ''));
+                if ($target === '') {
+                    logPairingEvent($db, 'PAIRING_CODE_REQUESTED', $sid, $clientIp, $userAgent, [
+                        'user_id' => (int)$u['id'], 'outcome' => 'no_email_on_file',
+                    ]);
+                    $generic();
+                }
+
+                // A code is a login credential, so it must never be minted for an
+                // account that has no business signing in at a till at all.
+                $role = (string)($u['role'] ?? '');
+                if (!in_array($role, ['owner', 'admin', 'cashier'], true)) {
+                    logPairingEvent($db, 'PAIRING_CODE_REQUESTED', $sid, $clientIp, $userAgent, [
+                        'user_id' => (int)$u['id'], 'outcome' => 'role_not_permitted', 'role' => $role,
+                    ]);
+                    $generic();
+                }
+
+                // Mint, retrying on collision. Two live codes sharing six digits
+                // is a lockout waiting to happen: redemption is ONE atomic UPDATE,
+                // so redeeming one would burn the other and strand a user who typed
+                // a perfectly valid code.
+                $code = null;
+                $codeHash = null;
+                for ($attempt = 0; $attempt < 12; $attempt++) {
+                    $candidate = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+                    $candidateHash = hash('sha256', $candidate);
+                    $taken = $db->prepare('SELECT 1 FROM platform_user_pairings WHERE code_hash = ? AND used_at IS NULL LIMIT 1');
+                    $taken->execute([$candidateHash]);
+                    if ($taken->fetchColumn() === false) {
+                        $code = $candidate;
+                        $codeHash = $candidateHash;
+                        break;
+                    }
+                }
+                if ($code === null) {
+                    json(false, null, 'Could not generate an activation code right now. Please try again.');
+                }
+
+                $ttl = max(300, (int)(getenv('PAIRING_CODE_TTL') ?: 86400));
+                $expiresUtc = gmdate('Y-m-d H:i:s', time() + $ttl);
+
+                // Retire the previous live code and insert the new one in ONE
+                // transaction. Split across two statements, a crash in between
+                // leaves two live codes and "the one I emailed you" becomes
+                // ambiguous — exactly the ambiguity that makes an owner give up
+                // and phone for a reset instead of reading the code we sent.
+                $issued = false;
+                try {
+                    // Sealed BEFORE the transaction so a key problem cannot
+                    // abort an otherwise good issue.
+                    $codeCipher = sealPairingCode((string)$code);
+
+                    $db->beginTransaction();
+                    $db->prepare(
+                        'UPDATE platform_user_pairings SET used_at = ?, code_cipher = NULL
+                          WHERE user_id = ? AND used_at IS NULL'
+                    )->execute([$nowUtc, (int)$u['id']]);
+                    $db->prepare(
+                        'INSERT INTO platform_user_pairings (user_id, store_id, code_hash, code_cipher, role, created_by, expires_at, created_at)
+                         VALUES (?,?,?,?,?,?,?,?)'
+                    )->execute([
+                        (int)$u['id'],
+                        $sid > 0 ? $sid : null,
+                        $codeHash,
+                        $codeCipher,
+                        $role,
+                        null,
+                        $expiresUtc,
+                        $nowUtc,
+                    ]);
+                    $db->commit();
+                    $issued = true;
+                } catch (\Throwable $e) {
+                    try { if ($db->inTransaction()) $db->rollBack(); } catch (\Throwable $ignored) {}
+                    error_log('cloud_pair_request issue failed: ' . $e->getMessage());
+                }
+
+                if (!$issued) {
+                    json(false, null, 'Could not create an activation code right now. Please try again.');
+                }
+
+                logPairingEvent($db, 'PAIRING_CODE_ISSUED', $sid, $clientIp, $userAgent, [
+                    'user_id'     => (int)$u['id'],
+                    'scope'       => 'user_request',
+                    'role'        => $role,
+                    'ttl_seconds' => $ttl,
+                ]);
+
+                [$mailOk, $mailErr] = sendBrevoMail(
+                    $target,
+                    (string)($u['full_name'] ?? ''),
+                    'Your ProCast activation code',
+                    "<html><body style='font-family:sans-serif;'>"
+                    . "<h2>Your ProCast activation code</h2>"
+                    . "<p>Hi " . htmlspecialchars((string)($u['full_name'] ?: $u['username'])) . ",</p>"
+                    . "<p>Your activation code for <strong>" . htmlspecialchars((string)$u['username']) . "</strong> is:</p>"
+                    . "<p style='font-size:28px;font-weight:800;letter-spacing:.3em;margin:20px 0;'>" . htmlspecialchars((string)$code) . "</p>"
+                    . "<p>Open ProCast on the computer you use at the till, enter this code when asked, "
+                    . "then sign in with your username and password.</p>"
+                    . "<p>It works <strong>once</strong>, and expires on <strong>" . gmdate('Y-m-d H:i', time() + $ttl) . " UTC</strong>.</p>"
+                    . "<p>If you did not try to activate ProCast, you can ignore this email.</p>"
+                    . "</body></html>"
+                );
+                logPairingEvent($db, $mailOk ? 'NOTIFICATION_EMAIL_SENT' : 'NOTIFICATION_EMAIL_FAILED', $sid, $clientIp, $userAgent, [
+                    'subject' => 'activation code', 'user_id' => (int)$u['id'], 'result' => $mailOk ? 'sent' : $mailErr,
+                ]);
+
+                // IDENTICAL to every other branch, including mail-failed. Saying
+                // "email failed" here would tell the caller — and anyone probing
+                // this endpoint — that the account exists and has an address. The
+                // admin's Local POS Access screen stays the fallback, and the
+                // failed send is already in the audit log staff can read.
+                $generic();
             }
 
             if ($action === 'cloud_pair_redeem') {
@@ -2674,6 +3143,7 @@ if (isset($_GET['api'])) {
                         SET used_at = ?, used_ip = ?, code_cipher = NULL
                       WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
                         AND (? = \'\' OR user_id = (SELECT id FROM users WHERE LOWER(username) = ?))
+                        AND (role IS NULL OR role = (SELECT role FROM users WHERE id = platform_user_pairings.user_id))
                    RETURNING user_id'
                 );
                 $st->execute([$nowUtc, $clientIp, $codeHash, $nowUtc, $claimedUser, $claimedUser]);
@@ -2962,6 +3432,42 @@ if (isset($_GET['api'])) {
                     if ($bStmt) $batches = $bStmt->fetchAll();
                 } catch (\Throwable $e) {}
 
+                // Stock movements (append-only ledger). Sent so the till's Recent Stock
+                // Movements reflects what happened on the cloud too -- e.g. a
+                // stock-out rung up by another cashier on another till. Bounded
+                // for the same reason the sale list is: the ledger grows without
+                // bound, and the newest rows are the ones anyone reads.
+                $movements = [];
+                try {
+                    if ($filterStoreId > 0) {
+                        $mvStmt = $db->prepare("
+                            SELECT w.id, w.cloud_uid, w.qty_in, w.qty_out, w.note,
+                                   w.event_date, w.supplier_ref,
+                                   b.batch_uid, p.cloud_uid AS product_cloud_uid,
+                                   p.cloud_id AS product_cloud_id, p.barcode
+                            FROM warehouse w
+                            JOIN products p ON p.id = w.product_id
+                            LEFT JOIN batches b ON b.id = w.batch_id
+                            WHERE p.store_id = ? AND w.cloud_uid IS NOT NULL
+                            ORDER BY w.id DESC LIMIT 300
+                        ");
+                        $mvStmt->execute([$filterStoreId]);
+                    } else {
+                        $mvStmt = $db->query("
+                            SELECT w.id, w.cloud_uid, w.qty_in, w.qty_out, w.note,
+                                   w.event_date, w.supplier_ref,
+                                   b.batch_uid, p.cloud_uid AS product_cloud_uid,
+                                   p.cloud_id AS product_cloud_id, p.barcode
+                            FROM warehouse w
+                            JOIN products p ON p.id = w.product_id
+                            LEFT JOIN batches b ON b.id = w.batch_id
+                            WHERE w.cloud_uid IS NOT NULL
+                            ORDER BY w.id DESC LIMIT 300
+                        ");
+                    }
+                    if ($mvStmt) $movements = $mvStmt->fetchAll(PDO::FETCH_ASSOC);
+                } catch (\Throwable $e) {}
+
                 // Users (allows offline login for this store)
                 $users = [];
                 try {
@@ -3050,6 +3556,7 @@ if (isset($_GET['api'])) {
                     'categories'   => $categories,
                     'products'     => $products,
                     'batches'      => $batches,
+                    'movements'    => $movements,
                     'users'        => $users,
                     'transactions' => $recentTransactions
                 ]);
@@ -3381,6 +3888,215 @@ if (isset($_GET['api'])) {
                     }
                 }
 
+                // ── DELIVERIES + STOCK MOVEMENTS FROM THE TILL ─────────────────────
+                // Both are append-only events carrying a stable cloud_uid, so the
+                // whole of idempotency rests on: "have I already got this exact
+                // identity?" Answering yes means SKIP, never update and never
+                // append again. That is what makes a retried push safe after a
+                // lost response -- the delivery cannot be credited twice.
+                $appliedDeliveryIds = [];
+                $appliedMovementIds = [];
+
+                // Resolves the cloud row for a pushed product. Mirrors the
+                // product-push resolution order (uid, then id, then barcode) so
+                // a stock event lands on the same product the catalog push chose.
+                $resolveCloudProduct = static function (array $ref, int $chgSid) use ($db): int {
+                    $uid = trim((string)($ref['cloud_uid'] ?? ''));
+                    $cid = isset($ref['cloud_id']) && $ref['cloud_id'] !== '' ? (int)$ref['cloud_id'] : 0;
+                    if ($uid !== '') {
+                        $t = $db->prepare("SELECT id FROM products WHERE cloud_uid=? AND store_id=?");
+                        $t->execute([$uid, $chgSid]);
+                        $found = (int)$t->fetchColumn();
+                        if ($found > 0) return $found;
+                    }
+                    if ($cid > 0) {
+                        $t = $db->prepare("SELECT id FROM products WHERE id=? AND store_id=?");
+                        $t->execute([$cid, $chgSid]);
+                        $found = (int)$t->fetchColumn();
+                        if ($found > 0) return $found;
+                    }
+                    if (!empty($ref['barcode'])) {
+                        $t = $db->prepare("SELECT id FROM products WHERE barcode=? AND store_id=?");
+                        $t->execute([trim((string)$ref['barcode']), $chgSid]);
+                        $found = (int)$t->fetchColumn();
+                        if ($found > 0) return $found;
+                    }
+                    return 0;
+                };
+
+                $deliveryList = is_array($body['deliveries'] ?? null) ? $body['deliveries'] : [];
+                foreach ($deliveryList as $dlv) {
+                    $dUid    = trim((string)($dlv['cloud_uid'] ?? ''));
+                    $dSid    = $payloadStoreId > 0 ? $payloadStoreId : 1;
+                    $localDId = isset($dlv['local_id']) ? (int)$dlv['local_id'] : 0;
+                    if ($dUid === '' || $localDId <= 0) continue;
+
+                    // Already applied? Confirm and move on. The stock credit below
+                    // must NOT run a second time, or a retry after a lost
+                    // response would double every delivery's quantity.
+                    try {
+                        $seen = $db->prepare("SELECT id FROM deliveries WHERE cloud_uid=? LIMIT 1");
+                        $seen->execute([$dUid]);
+                        if ($seen->fetchColumn()) {
+                            $appliedDeliveryIds[] = $localDId;
+                            continue;
+                        }
+                    } catch (\Throwable $e) {
+                        error_log('push delivery dup check failed: ' . $e->getMessage());
+                    }
+
+                    // Transactional: the header and all of its lots land together
+                    // or not at all. A header without its lots would describe
+                    // stock that does not exist, and FEFO would have nothing to
+                    // consume from later.
+                    // Rolled back here if the unique index on deliveries(cloud_uid)
+                    // rejected the header, because a concurrent push inserted
+                    // this same delivery first. That is benign — the delivery is
+                    // present exactly once — so acknowledge it. Leaving it
+                    // unacknowledged would also be safe (the till retries and
+                    // hits the dup check above), but it would cost a whole extra
+                    // sync cycle to learn something we already know.
+                    $db->beginTransaction();
+                    try {
+                        $db->prepare("INSERT INTO deliveries (store_id, cloud_uid, supplier_ref, event_date, note, created_by)
+                                      VALUES (?, ?, ?, ?, ?, NULL)")
+                           ->execute([
+                               $dSid, $dUid,
+                               $dlv['supplier_ref'] ?? null,
+                               $dlv['event_date']   ?? null,
+                               $dlv['note']         ?? null,
+                           ]);
+                        $cloudDeliveryId = lastInsertedId($db);
+
+                        // A lot that cannot be attributed makes the WHOLE delivery
+                        // unsound: the header would claim stock that was never
+                        // booked in. Previously such a lot was skipped and the
+                        // delivery acknowledged anyway, which silently and
+                        // permanently lost that line's quantity while telling the
+                        // till "done". Collected first, then acted on below.
+                        $unresolvedLots = 0;
+                        foreach ((array)($dlv['lots'] ?? []) as $lot) {
+                            $bUid = trim((string)($lot['batch_uid'] ?? ''));
+                            if ($bUid === '') { $unresolvedLots++; continue; }
+                            $cloudPid = $resolveCloudProduct((array)($lot['product'] ?? []), $dSid);
+                            // A lot with no identifiable product must not be
+                            // attached to an arbitrary one -- that would invent
+                            // stock for the wrong item.
+                            if ($cloudPid <= 0) { $unresolvedLots++; continue; }
+
+                            // Skip a lot already known here (same identity, e.g. a
+                            // retry that raced) rather than inserting a twin.
+                            $lotSeen = $db->prepare("SELECT id FROM batches WHERE batch_uid=? AND product_id=? LIMIT 1");
+                            $lotSeen->execute([$bUid, $cloudPid]);
+                            if ($lotSeen->fetchColumn()) continue;
+
+                            $db->prepare("INSERT INTO batches (delivery_id, product_id, qty_received, qty_warehouse, qty_store, cost_price, expiry_date, batch_uid, fefo_seq)
+                                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                               ->execute([
+                                   $cloudDeliveryId, $cloudPid,
+                                   (int)($lot['qty_received']  ?? 0),
+                                   (int)($lot['qty_warehouse'] ?? 0),
+                                   (int)($lot['qty_store']     ?? 0),
+                                   isset($lot['cost_price']) && $lot['cost_price'] !== '' ? (float)$lot['cost_price'] : null,
+                                   $lot['expiry_date'] ?? null,
+                                   $bUid,
+                                   isset($lot['fefo_seq']) && $lot['fefo_seq'] !== '' ? (int)$lot['fefo_seq'] : null,
+                               ]);
+                        }
+
+                        // All-or-nothing. Reject rather than acknowledge a
+                        // partially valid delivery: the till keeps the whole
+                        // thing queued and retries, which is safe because the
+                        // cloud_uid is stable and the retry is idempotent.
+                        if ($unresolvedLots > 0) {
+                            throw new \RuntimeException(
+                                "delivery {$dUid}: {$unresolvedLots} line(s) could not be matched to a product"
+                            );
+                        }
+
+                        $db->commit();
+                        $appliedDeliveryIds[] = $localDId;
+                    } catch (\Throwable $e) {
+                        if ($db->inTransaction()) $db->rollBack();
+                        // A unique violation means a concurrent push already
+                        // applied this exact delivery: it is present once, which
+                        // is precisely the outcome we wanted. Acknowledge it.
+                        if ($e instanceof \PDOException && isUniqueViolation($e)) {
+                            $appliedDeliveryIds[] = $localDId;
+                            continue;
+                        }
+                        // Anything else: not acknowledged, so the till keeps this
+                        // delivery queued and retries. Because the uid is stable,
+                        // the retry lands on the same row instead of forking a
+                        // second delivery.
+                        error_log('push delivery apply failed: ' . $e->getMessage());
+                    }
+                }
+                $movementList = is_array($body['movements'] ?? null) ? $body['movements'] : [];
+                foreach ($movementList as $mv) {
+                    $mUid    = trim((string)($mv['cloud_uid'] ?? ''));
+                    $mSid    = $payloadStoreId > 0 ? $payloadStoreId : 1;
+                    $localMId = isset($mv['local_id']) ? (int)$mv['local_id'] : 0;
+                    if ($mUid === '' || $localMId <= 0) continue;
+
+                    // The idempotency check for an event: one uid, one row.
+                    // Re-applying would double the ledger AND make the movement
+                    // history disagree with the balances it explains.
+                    try {
+                        $seen = $db->prepare("SELECT id FROM warehouse WHERE cloud_uid=? LIMIT 1");
+                        $seen->execute([$mUid]);
+                        if ($seen->fetchColumn()) {
+                            $appliedMovementIds[] = $localMId;
+                            continue;
+                        }
+                    } catch (\Throwable $e) {
+                        error_log('push movement dup check failed: ' . $e->getMessage());
+                    }
+
+                    $cloudPid = $resolveCloudProduct((array)($mv['product'] ?? []), $mSid);
+                    if ($cloudPid <= 0) continue;      // cannot attribute the movement; do not guess
+
+                    // batch_uid (not batch_id): the cloud's lot ids are its own and
+                    // collide with the till's constantly.
+                    $lotId = null;
+                    $lotUid = trim((string)($mv['batch_uid'] ?? ''));
+                    if ($lotUid !== '') {
+                        $lb = $db->prepare("SELECT id FROM batches WHERE batch_uid=? AND product_id=? LIMIT 1");
+                        $lb->execute([$lotUid, $cloudPid]);
+                        $found = $lb->fetchColumn();
+                        if ($found !== false && $found !== null) { $lotId = (int)$found; }
+                    }
+
+                    try {
+                        // Write the event with the TILL's uid rather than a fresh
+                        // one, so when this movement is pulled back down the
+                        // till recognises it as its own and does not re-insert.
+                        $db->prepare("INSERT INTO warehouse (product_id, qty_in, qty_out, note, created_by, event_date, batch_id, supplier_ref, cloud_uid)
+                                      VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)")
+                           ->execute([
+                               $cloudPid,
+                               (int)($mv['qty_in']  ?? 0),
+                               (int)($mv['qty_out'] ?? 0),
+                               $mv['note']         ?? null,
+                               $mv['event_date']   ?? null,
+                               $lotId,
+                               $mv['supplier_ref'] ?? null,
+                               $mUid,
+                           ]);
+                        $appliedMovementIds[] = $localMId;
+                    } catch (\Throwable $e) {
+                        // Unique violation = a concurrent push applied this same
+                        // movement first. It is stored exactly once, which is what
+                        // we wanted, so acknowledge rather than forcing the till
+                        // to burn another sync rediscovering it.
+                        if ($e instanceof \PDOException && isUniqueViolation($e)) {
+                            $appliedMovementIds[] = $localMId;
+                            continue;
+                        }
+                        error_log('push movement apply failed: ' . $e->getMessage());
+                    }
+                }
+
                 json(true, [
                     'synced_count' => count($syncedLocalIds),
                     'synced_local_ids' => $syncedLocalIds,
@@ -3389,6 +4105,8 @@ if (isset($_GET['api'])) {
                     'applied_ids'  => array_values(array_filter($appliedIds)),
                     'id_map'       => $idMap,
                     'applied_products' => count(array_filter($appliedIds)),
+                    'applied_delivery_ids' => $appliedDeliveryIds,
+                    'applied_movement_ids' => $appliedMovementIds,
                 ]);
             }
         } catch (\Throwable $e) {
@@ -3913,11 +4631,9 @@ if (isset($_GET['api'])) {
                     $db->prepare("INSERT INTO warehouse_stock (product_id,quantity) VALUES (?,0) ON CONFLICT (product_id) DO NOTHING")->execute([$id]);
                     // Log store quantity change
                     if ($diff > 0) {
-                        $db->prepare("INSERT INTO warehouse (product_id,qty_in,note,created_by) VALUES (?,?,?,?)")
-                            ->execute([$id, $diff, 'Store restock', $uid]);
+                        recordStockMovement($db, $id, $diff, 0, 'Store restock', $uid);
                     } elseif ($diff < 0) {
-                        $db->prepare("INSERT INTO warehouse (product_id,qty_out,note,created_by) VALUES (?,?,?,?)")
-                            ->execute([$id, abs($diff), 'Store adjustment', $uid]);
+                        recordStockMovement($db, $id, 0, abs($diff), 'Store adjustment', $uid);
                     }
                     if ($expiry) {
                         $db->prepare("UPDATE batches SET expiry_date = ? WHERE product_id = ?")
@@ -4204,8 +4920,7 @@ if (isset($_GET['api'])) {
                         } else {
                             $db->prepare("UPDATE products SET quantity=quantity+?,store_quantity=store_quantity+? WHERE id=?")->execute([$qty, $qty, $pid]);
                         }
-                        $db->prepare("INSERT INTO warehouse (product_id,qty_in,note,created_by,event_date) VALUES (?,?,?,?,?)")
-                            ->execute([$pid, $qty, $locTag . 'Customer return (restocked)' . ($note ? ' — ' . $note : ''), $uid, $pulloutDate]);
+                        recordStockMovement($db, $pid, $qty, 0, $locTag . 'Customer return (restocked)' . ($note ? ' — ' . $note : ''), $uid, $pulloutDate);
                         $direction = 'addition';
                         // Returns don't carry known cost/expiry, so — unlike damage/
                         // expired pull-outs — these aren't attributed to a specific batch.
@@ -4512,7 +5227,6 @@ if (isset($_GET['api'])) {
                         $suStore = $db->prepare("UPDATE products SET quantity=quantity-?, store_quantity=store_quantity-?, total_sold=total_sold+?, total_revenue=total_revenue+? WHERE id=? AND store_quantity>=?");
                         $suWh = $db->prepare("UPDATE warehouse_stock SET quantity=quantity-? WHERE product_id=? AND quantity>=?");
                         $suWhProd = $db->prepare("UPDATE products SET total_sold=total_sold+?, total_revenue=total_revenue+? WHERE id=?");
-                        $whLog = $db->prepare("INSERT INTO warehouse (product_id, qty_out, note, created_by, event_date) VALUES (?, ?, ?, ?, CURRENT_DATE)");
                         $costLookup = $db->prepare("SELECT cost_price FROM products WHERE id=?");
 
                         foreach ($items as $item) {
@@ -4539,9 +5253,7 @@ if (isset($_GET['api'])) {
                                         throw new Exception("Stock conflict: Item '{$item['name']}' warehouse reserve changed concurrently.");
                                     }
                                     $suWhProd->execute([$qty, $sub, $pid]);
-                                    try {
-                                        $whLog->execute([$pid, $qty, "POS Sale - Ref $ref", $uid]);
-                                    } catch (\Throwable $we) {}
+                                    recordStockMovement($db, $pid, 0, $qty, "POS Sale - Ref $ref", $uid, date('Y-m-d'));
                                 } else {
                                     $suStore->execute([$qty, $qty, $qty, $sub, $pid, $qty]);
                                     if ($suStore->rowCount() === 0) {
