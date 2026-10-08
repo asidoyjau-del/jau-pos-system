@@ -3798,8 +3798,23 @@ if (isset($_GET['api'])) {
                             if ($targetId > 0) {
                                 $db->prepare("DELETE FROM warehouse_stock WHERE product_id=?")->execute([$targetId]);
                                 $db->prepare("DELETE FROM products WHERE id=? AND store_id=?")->execute([$targetId, $chgSid]);
+                                // Only confirm the delete when a row really was
+                                // removed. Echoing the outbox_id unconditionally
+                                // made the till clear its outbox row for a delete
+                                // that never matched anything, so the product was
+                                // never actually removed and then reappeared on the
+                                // next catalog pull -- a deletion lost for good,
+                                // reported as a success.
+                                $appliedIds[] = (int)($chg['outbox_id'] ?? 0);
+                            } else {
+                                error_log('[cloud_sync_push] delete matched no product for outbox '
+                                    . (int)($chg['outbox_id'] ?? 0)
+                                    . ' store ' . $chgSid
+                                    . ' barcode=' . (string)($prod['barcode'] ?? '')
+                                    . ' cloud_id=' . $cloudId
+                                    . ' cloud_uid=' . $pushUid
+                                    . ' -- left unacknowledged so the till retries');
                             }
-                            $appliedIds[] = (int)($chg['outbox_id'] ?? 0);
                             continue;
                         }
                         if (trim((string)($prod['name'] ?? '')) === '') continue;   // nothing usable yet
