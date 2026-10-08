@@ -122,7 +122,10 @@ final class Kernel
                 case $path === '/monitoring':
                     return $dash->monitoring($req, $session, $admin, $now);
                 case $path === '/api/telemetry':
-                    return $dash->telemetry($now);
+                    // $req is passed so the poll can honour the same ?store= scope
+                    // as the page; otherwise it would overwrite a store's figures
+                    // with platform totals on every tick.
+                    return $dash->telemetry($req, $now);
                 case $path === '/api/health':
                     return $dash->health();
                 case $path === '/stores':
@@ -145,6 +148,11 @@ final class Kernel
             // email never arrived. Same CSRF/guard path as issuing one.
             if (preg_match('#^/users/(\d{1,10})/pairing/reveal$#', $path, $m)) {
                 return $dash->revealUserPairing($req, $session, $admin, (int)$m[1]);
+            }
+            // Pulls back ONE account's live code without minting a replacement,
+            // for when the code itself must stop working.
+            if (preg_match('#^/users/(\d{1,10})/pairing/revoke$#', $path, $m)) {
+                return $dash->revokeUserPairing($req, $session, $admin, (int)$m[1]);
             }
             if (preg_match('#^/stores/(\d{1,10})/pairing/reveal$#', $path, $m)) {
                 return $dash->revealPairing($req, $session, $admin, (int)$m[1]);

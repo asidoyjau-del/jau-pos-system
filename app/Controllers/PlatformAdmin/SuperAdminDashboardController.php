@@ -32,12 +32,62 @@ final class SuperAdminDashboardController
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
     public function monitoring(Request $req, array &$session, array $admin, int $now): Response
     {
-        return $this->page('monitoring', $session, $admin, 'Global monitoring', 'monitoring', [
-            'counts' => $this->stores->counts(),
-            'sessions' => $this->stores->activeSessions($now),
-            'volume' => $this->stores->volume($now),
-            'analytics' => $this->stores->analytics($now, 14),
+        $scope   = $this->monitoringScope($req);
+        $store   = $scope['store'];
+        $storeId = $store === null ? null : (int)$store['id'];
+
+        // A named-but-unknown store id is refused outright. Answering it with the
+        // platform roll-up would put every tenant's revenue under a URL that still
+        // claims to be one store, and the page would look entirely normal.
+        if ($scope['invalid']) {
+            return Response::notFound();
+        }
+
+        // counts() is deliberately NOT scoped. It is the platform's store-lifecycle
+        // census (how many are pending/suspended) and has no meaning per-tenant;
+        // hiding the queue while looking at one store would be actively misleading.
+        // Everything that is a TRADING metric -- sessions, volume, analytics -- is
+        // computed from the selected store's own rows.
+        return $this->page('monitoring', $session, $admin,
+            $store === null ? 'Global monitoring' : 'Monitoring — ' . (string)($store['display_name'] ?: $store['name']),
+            'monitoring', [
+            'counts'   => $this->stores->counts(),
+            'sessions' => $this->stores->activeSessions($now, $storeId),
+            'volume'   => $this->stores->volume($now, $storeId),
+            'analytics'=> $this->stores->analytics($now, 14, $storeId),
+            'store'    => $store,
+            'storeId'  => $storeId,
+            'stores'   => $store === null ? $this->stores->list(null, '', 200) : [],
+            'now'      => $now,
         ]);
+    }
+
+    /**
+     * Resolves the ?store= monitoring filter to a real, existing store row.
+     *
+     * Three outcomes, deliberately kept distinct:
+     *   store null, invalid false -> "All stores" was asked for.
+     *   store row, invalid false  -> a real store was named.
+     *   store null, invalid true  -> a numeric id was named that does NOT resolve.
+     *
+     * The third case must never degrade into the first. Silently falling back to
+     * the platform roll-up on a stale or mistyped id is the dangerous outcome:
+     * the admin would see every tenant's revenue on a page whose URL still says
+     * they were looking at one store, with nothing to signal the mismatch. So an
+     * unresolvable id is rejected (404) rather than answered.
+     *
+     * @return array{store:array<string,mixed>|null,invalid:bool}
+     */
+    private function monitoringScope(Request $req): array
+    {
+        $raw = trim((string)$req->queryStr('store'));
+        if ($raw === '' || !ctype_digit($raw)) {
+            // Non-numeric input is the selector's own "All stores" option (value=""),
+            // not a bad reference, so it is a legitimate platform-wide request.
+            return ['store' => null, 'invalid' => false];
+        }
+        $store = $this->stores->find((int)$raw);
+        return ['store' => $store, 'invalid' => $store === null];
     }
 
     /**
@@ -46,14 +96,34 @@ final class SuperAdminDashboardController
      * Deliberately does NOT include analytics(): the trend/top-store queries scan
      * the whole window and this endpoint is hit on a short interval, so folding
      * them in here would turn a status poll into a reporting query.
+     *
+     * Accepts the same ?store= scope as the page it backs. The poll MUST honour
+     * it: a status widget that refreshed "Today's revenue" with platform totals
+     * while the page beside it showed one store would mean the two disagree in
+     * real time, and the poll would overwrite the correct figure every 30s.
      */
-    public function telemetry(int $now): Response
+    public function telemetry(Request $req, int $now): Response
     {
+        $scope   = $this->monitoringScope($req);
+        $store   = $scope['store'];
+        $storeId = $store === null ? null : (int)$store['id'];
+
+        // Same rule as the page it backs: an unresolvable scope gets an error, not
+        // a platform-wide payload. admin.js already skips non-OK responses, so a
+        // dead id leaves the last good figures on screen instead of painting
+        // every tenant's totals into a single store's tiles.
+        if ($scope['invalid']) {
+            return Response::json(['error' => 'unknown_store', 'store_id' => null], 404);
+        }
+
         return Response::json([
             'counts'   => $this->stores->counts(),
-            'sessions' => $this->stores->activeSessions($now),
-            'volume'   => $this->stores->volume($now),
+            'sessions' => $this->stores->activeSessions($now, $storeId),
+            'volume'   => $this->stores->volume($now, $storeId),
             'at'       => gmdate('c', $now),
+            // Echoed so admin.js can tell a scoped widget from a platform one
+            // rather than trusting whatever id the page URL happens to carry.
+            'store_id' => $storeId,
         ]);
     }
 
@@ -485,6 +555,58 @@ final class SuperAdminDashboardController
         return $this->flashBack($session, $storeId, 'success', 'Code shown below. Copy it for ' . (string)$store['name'] . '.');
     }
 
+    /**
+     * Kills one account's live activation code without touching the others.
+     *
+     * Needed whenever a code has to be pulled back without minting a replacement:
+     * it leaked to the wrong person, the user was issued the wrong role, or the
+     * till is being rebuilt. "Issue new code" also retires the old code, but it
+     * simultaneously hands out a fresh credential and emails it — which is the
+     * wrong move when the whole point is to make sure nobody new can activate
+     * with what they were holding.
+     *
+     * Only UNUSED codes are revoked. A redeemed code is history: the account is
+     * already activated, and rewriting used_at on it would falsify the audit
+     * trail that records when the activation actually happened.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function revokeUserPairing(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId  = (int)($user['store_id'] ?? 0);
+        $username = (string)$user['username'];
+
+        // Confirm against the person, not the store: revoking is per-account, so
+        // an admin who means to kill one cashier's code should not be stopped by
+        // having to retype a business name they did not have in mind.
+        if (!$this->confirmed($req, $username)) {
+            return $this->flashBack($session, $storeId, 'error',
+                'Type the exact username (' . $username . ') to confirm.');
+        }
+
+        // hasLiveUserPairing(), not liveUserPairingCipher(): the code an admin
+        // cannot read is exactly the one they most need to revoke.
+        $hadLive = $this->stores->hasLiveUserPairing($userId);
+
+        $this->stores->revokeUserPairing($userId);
+
+        Audit::log($this->db, (int)$admin['id'], Audit::PAIRING_REVOKED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $username,
+            'scope'   => 'user',
+            'had_live_code' => $hadLive,
+        ]);
+
+        return $this->flashBack($session, $storeId, 'success',
+            $hadLive
+                ? 'Activation code for ' . $username . ' revoked. It can no longer be used.'
+                : 'No unused code was live for ' . $username . ' — nothing needed revoking.');
+    }
+
     // ── Lifecycle actions (POST, CSRF already verified by the Kernel) ─────
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
     public function approve(Request $req, array &$session, array $admin, int $storeId, int $now): Response
@@ -668,9 +790,16 @@ final class SuperAdminDashboardController
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
-    private function confirmed(Request $req, string $storeName): bool
+    /**
+     * Destructive-action gate: the caller must retype $expected exactly.
+     *
+     * $expected is not always a store name — per-user pairing revocation asks for
+     * the username instead, because the admin's target there is one person
+     * rather than the whole business.
+     */
+    private function confirmed(Request $req, string $expected): bool
     {
-        return hash_equals($storeName, $req->input('confirm_text'));
+        return hash_equals($expected, $req->input('confirm_text'));
     }
 
     /**

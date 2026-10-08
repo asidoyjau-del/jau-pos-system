@@ -29,6 +29,7 @@ final class Audit
     public const PAIRING_USED     = 'PAIRING_CODE_USED';
     public const PAIRING_FAILED   = 'PAIRING_CODE_FAILED';
     public const PAIRING_REVEALED = 'PAIRING_CODE_REVEALED';
+    public const PAIRING_REVOKED  = 'PAIRING_CODE_REVOKED';
     public const EMAIL_SENT       = 'NOTIFICATION_EMAIL_SENT';
     public const EMAIL_FAILED     = 'NOTIFICATION_EMAIL_FAILED';
     public const DOCUMENT_VIEWED  = 'DOCUMENT_VIEWED';

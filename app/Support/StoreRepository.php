@@ -144,6 +144,40 @@ final class StoreRepository
     }
 
     /**
+     * The WHERE fragment that scopes an analytics query, plus its bound arguments.
+     *
+     * Every monitoring number has to be attributable to the store the admin is
+     * looking at, so this is the single place that decides "platform-wide" vs
+     * "one store". Centralising it means a new metric cannot accidentally ship
+     * with a forgotten filter and quietly report every tenant's numbers on a
+     * single store's page.
+     *
+     * Scoped deliberately DROPS the status='active' requirement that the
+     * platform-wide queries carry. 'Active' is a portfolio roll-up filter, not a
+     * correctness rule: an admin opening a suspended or pending store's
+     * monitoring is diagnosing why it went quiet, and blanking the figures is
+     * precisely the moment they are needed. The platform-wide views keep it.
+     *
+     * Returns [sqlFragment, args] rather than just SQL because the placeholder
+     * lands mid-statement: PostgreSQL binds by the order a '?' appears in the
+     * TEXT, so a caller with an existing list (e.g. a timezone in the SELECT)
+     * has to splice the arguments in at the right index, not append them.
+     *
+     * @param string $alias alias of the table that actually OWNS store_id. Almost
+     *                     always the transactions alias 't', but activeSessions()
+     *                     counts auth_tokens and must pass 'u' -- auth_tokens has
+     *                     no store_id column, so binding to the wrong alias is an
+     *                     immediate SQL error rather than a wrong number.
+     * @return array{0:string,1:list<mixed>}
+     */
+    private function storeScope(?int $storeId, string $alias = 't'): array
+    {
+        return $storeId === null
+            ? ["s.status = 'active'", []]
+            : ["$alias.store_id = ?", [$storeId]];
+    }
+
+    /**
      * SQL that buckets a timestamp column into YYYY-MM-DD in the BUSINESS timezone.
      *
      * The POS writes created_at as a UTC wall clock, but "today's revenue" has to
@@ -511,6 +545,32 @@ final class StoreRepository
     }
 
     /**
+     * Whether an account currently has ANY unused code, regardless of whether it
+     * can still be decrypted.
+     *
+     * liveUserPairingCipher() answers a different question — "is there a code I can
+     * show?" — and returns null both when nothing is live and when a code IS live
+     * but its ciphertext is missing (no encryption key, or the key was rotated).
+     * Revoking needs the first answer, so asking the reveal-oriented helper would
+     * report "nothing to revoke" for exactly the codes an admin most wants to
+     * pull back: the ones they cannot read.
+     *
+     * Expiry is deliberately NOT tested. A stale code is harmless to revoke and
+     * the admin's intent ("kill anything outstanding for this person") is
+     * unambiguous either way.
+     */
+    public function hasLiveUserPairing(int $userId): bool
+    {
+        $st = $this->db->prepare(
+            'SELECT 1 FROM platform_user_pairings
+              WHERE user_id = ? AND used_at IS NULL
+              LIMIT 1'
+        );
+        $st->execute([$userId]);
+        return $st->fetchColumn() !== false;
+    }
+
+    /**
      * Revokes any live code for one account. Used when the admin wants to force
      * someone to activate again (e.g. after a reinstall of the local POS).
      */
@@ -623,42 +683,56 @@ final class StoreRepository
         return $r ?: null;
     }
 
-    /** Cashier/manager sessions: unexpired remember-token AND a login in the last 30 min, on ACTIVE stores only. */
-    public function activeSessions(int $now): int
+    /**
+     * Cashier/manager sessions: unexpired remember-token AND a login in the last
+     * 30 min.
+     *
+     * Pass $storeId to count one store's live sessions; null keeps the
+     * platform-wide "active stores only" roll-up. The two differ deliberately:
+     * "no active stores" is a meaningful platform-wide signal, but the same
+     * filter on one store's page would just hide a real, still-logged-in till.
+     */
+    public function activeSessions(int $now, ?int $storeId = null): int
     {
+        /* 'u', not the default 't': the counting table here is auth_tokens, and the
+           store each cashier belongs to hangs off users.store_id. Scoping through
+           t.store_id would reference a column auth_tokens does not have. */
+        [$scope, $scopeArgs] = $this->storeScope($storeId, 'u');
         $st = $this->db->prepare(
             "SELECT COUNT(DISTINCT t.user_id) FROM auth_tokens t
              JOIN users u ON u.id = t.user_id
              JOIN stores s ON s.id = u.store_id
-             WHERE s.status = 'active' AND t.expires_at > ? AND u.last_login > ?"
+             WHERE $scope AND t.expires_at > ? AND u.last_login > ?"
         );
-        $st->execute([gmdate('Y-m-d H:i:s', $now), gmdate('Y-m-d H:i:s', $now - 1800)]);
+        $st->execute(array_merge($scopeArgs, [gmdate('Y-m-d H:i:s', $now), gmdate('Y-m-d H:i:s', $now - 1800)]));
         return (int)$st->fetchColumn();
     }
 
     /**
-     * Order count + net revenue for today and this month, over ACTIVE stores.
+     * Order count + net revenue for today and this month.
      *
      * Built from the guarded helpers rather than hard-coded column names: voided_total
      * and status are both added by best-effort ALTERs, so on an older schema the
      * original literal query raised "column does not exist" and took the whole
      * monitoring page down with it.
      *
+     * @param int|null $storeId one store, or null for the platform-wide roll-up
      * @return array{today:array{count:int,total:float},month:array{count:int,total:float}}
      */
-    public function volume(int $now): array
+    public function volume(int $now, ?int $storeId = null): array
     {
         $local = (new DateTimeImmutable('@' . $now))->setTimezone($this->tz());
         $monthStart = $local->modify('first day of this month')->setTime(0, 0)
             ->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
 
+        [$scope, $scopeArgs] = $this->storeScope($storeId);
         $sql = 'SELECT COUNT(*) AS c, COALESCE(SUM(' . $this->netSql('t') . '),0) AS v
                   FROM transactions t JOIN stores s ON s.id = t.store_id
-                 WHERE s.status = \'active\' AND t.created_at >= ? ' . $this->voidFilter('t');
+                 WHERE ' . $scope . ' AND t.created_at >= ? ' . $this->voidFilter('t');
         $out = [];
         foreach (['today' => $this->localMidnightUtc($now, 0), 'month' => $monthStart] as $k => $since) {
             $st = $this->db->prepare($sql);
-            $st->execute([$since]);
+            $st->execute(array_merge($scopeArgs, [$since]));
             $r = $st->fetch(PDO::FETCH_ASSOC) ?: ['c' => 0, 'v' => 0];
             $out[$k] = ['count' => (int)$r['c'], 'total' => (float)$r['v']];
         }
@@ -671,16 +745,34 @@ final class StoreRepository
      * Each section is computed independently and wrapped, so one unsupported
      * breakdown costs that card only -- never the page.
      *
+     * $storeId scopes EVERY section to a single store, and each is computed from
+     * that store's own rows -- the platform roll-up is never filtered client-side,
+     * because a subtotal that does not match its own detail is the one number an
+     * admin cannot trust. 'top_stores' is the deliberate exception and reports
+     * itself unavailable instead: ranking one store against itself would always
+     * return a single-row "leaderboard".
+     *
+     * @param int|null $storeId one store, or null for the platform-wide view
      * @return array<string,mixed>
      */
-    public function analytics(int $now, int $days = 14): array
+    public function analytics(int $now, int $days = 14, ?int $storeId = null): array
     {
         $days = max(2, min(90, $days));
+        /* Every value here is a QUERY SECTION and nothing else. Adding a
+           non-query sibling such as a 'scope' descriptor would be tempting --
+           the caller does want to know it is scoped -- but this array is
+           contractually "every key must degrade to ['available'=>false] when the
+           schema breaks", and a constant descriptor never degrades. It would
+           report itself as a failed section on an older schema. The scope is
+           instead passed out-of-band: the caller already holds $storeId, and
+           telemetry echoes it as store_id. */
         return [
-            'trend'      => $this->safe(fn() => $this->revenueTrend($now, $days)),
-            'top_stores' => $this->safe(fn() => $this->topStores($now, $days, 8)),
-            'summary'    => $this->safe(fn() => $this->periodSummary($now, $days)),
-            'splits'     => $this->safe(fn() => $this->optionalSplits($now, $days)),
+            'trend'      => $this->safe(fn() => $this->revenueTrend($now, $days, $storeId)),
+            'top_stores' => $storeId === null
+                ? $this->safe(fn() => $this->topStores($now, $days, 8))
+                : ['available' => false, 'reason' => 'store_scoped'],
+            'summary'    => $this->safe(fn() => $this->periodSummary($now, $days, $storeId)),
+            'splits'     => $this->safe(fn() => $this->optionalSplits($now, $days, $storeId)),
         ];
     }
 
@@ -709,18 +801,24 @@ final class StoreRepository
      * make a chart connect Tuesday straight to Friday and imply the shop traded on
      * days it was shut, which reads as lost revenue rather than no revenue.
      */
-    private function revenueTrend(int $now, int $days): array
+    private function revenueTrend(int $now, int $days, ?int $storeId = null): array
     {
+        [$scope, $scopeArgs] = $this->storeScope($storeId);
         $st = $this->db->prepare(
             'SELECT ' . $this->localDayExpr('t.created_at') . ' AS d,
                     COUNT(*) AS c, COALESCE(SUM(' . $this->netSql('t') . '),0) AS v
                FROM transactions t JOIN stores s ON s.id = t.store_id
-              WHERE s.status = \'active\' AND t.created_at >= ? ' . $this->voidFilter('t') . '
+              WHERE ' . $scope . ' AND t.created_at >= ? ' . $this->voidFilter('t') . '
               GROUP BY d ORDER BY d'
         );
         // Placeholder order follows the SQL text, not reading order: the timezone
-        // lands in the SELECT clause first, the window start in the WHERE clause.
-        $st->execute([$this->tzName(), $this->localMidnightUtc($now, $days - 1)]);
+        // lands in the SELECT clause first, then the store scope and window start
+        // in the WHERE clause.
+        $st->execute(array_merge(
+            [$this->tzName()],
+            $scopeArgs,
+            [$this->localMidnightUtc($now, $days - 1)]
+        ));
         $by = [];
         foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
             $by[(string)$r['d']] = ['total' => (float)$r['v'], 'count' => (int)$r['c']];
@@ -783,11 +881,12 @@ final class StoreRepository
      *
      * @return array{available:bool,count:int,total:float,aov:float,voided:int,void_rate:float}
      */
-    private function periodSummary(int $now, int $days): array
+    private function periodSummary(int $now, int $days, ?int $storeId = null): array
     {
         $since  = $this->localMidnightUtc($now, $days - 1);
         $valid  = $this->notVoidSql('t');
         $hasStatus = $this->hasColumn('transactions', 'status');
+        [$scope, $scopeArgs] = $this->storeScope($storeId);
 
         /* Revenue and the order count are restricted to non-voided orders with an
            aggregate FILTER rather than a WHERE clause. The void tally has to be
@@ -798,9 +897,9 @@ final class StoreRepository
              . ', COALESCE(SUM(' . $this->netSql('t') . ') FILTER (WHERE ' . $valid . '),0) AS v'
              . ($hasStatus ? ', COUNT(*) FILTER (WHERE ' . $this->voidedSql('t') . ') AS vx' : '')
              . " FROM transactions t JOIN stores s ON s.id = t.store_id
-                WHERE s.status = 'active' AND t.created_at >= ?";
+                WHERE $scope AND t.created_at >= ?";
         $st = $this->db->prepare($sql);
-        $st->execute([$since]);
+        $st->execute(array_merge($scopeArgs, [$since]));
         $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
 
         $count = (int)($r['c'] ?? 0);
@@ -832,29 +931,32 @@ final class StoreRepository
      * raises SQLSTATE 42703 (undefined column) and kills the whole request, so each
      * split is feature-gated and reports itself null/unavailable instead.
      */
-    private function optionalSplits(int $now, int $days): array
+    private function optionalSplits(int $now, int $days, ?int $storeId = null): array
     {
         $since = $this->localMidnightUtc($now, $days - 1);
         return [
             'available'       => true,
             'payment_methods' => $this->hasColumn('transactions', 'payment_method')
-                ? $this->splitBy('t.payment_method', $since, 'Unknown') : null,
+                ? $this->splitBy('t.payment_method', $since, 'Unknown', $storeId) : null,
             'order_types'     => $this->hasColumn('transactions', 'order_type')
-                ? $this->splitBy('t.order_type', $since, 'Unknown') : null,
+                ? $this->splitBy('t.order_type', $since, 'Unknown', $storeId) : null,
         ];
     }
 
     /** @return list<array{label:string,total:float,count:int}> */
-    private function splitBy(string $expr, string $since, string $fallbackLabel): array
+    private function splitBy(string $expr, string $since, string $fallbackLabel, ?int $storeId = null): array
     {
+        [$scope, $scopeArgs] = $this->storeScope($storeId);
         $st = $this->db->prepare(
             'SELECT COALESCE(NULLIF(' . $expr . ",\'\'), ?) AS label,
                     COALESCE(SUM(" . $this->netSql('t') . '),0) AS v, COUNT(*) AS c
                FROM transactions t JOIN stores s ON s.id = t.store_id
-              WHERE s.status = \'active\' AND t.created_at >= ? ' . $this->voidFilter('t') . '
+              WHERE ' . $scope . ' AND t.created_at >= ? ' . $this->voidFilter('t') . '
               GROUP BY label ORDER BY v DESC LIMIT 12'
         );
-        $st->execute([$fallbackLabel, $since]);
+        // The fallback label is the FIRST placeholder in the text (SELECT clause),
+        // ahead of the scope and the window start in the WHERE clause.
+        $st->execute(array_merge([$fallbackLabel], $scopeArgs, [$since]));
         $out = [];
         foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
             $out[] = ['label' => (string)$r['label'], 'total' => (float)$r['v'], 'count' => (int)$r['c']];
