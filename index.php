@@ -3827,6 +3827,13 @@ if (isset($_GET['api'])) {
                             p.case_qty, p.case_barcode, p.case_price,
                             p.low_stock_threshold, p.expiry_date, p.delivery_date,
                             p.brand, p.supplier, p.category_id, p.store_id, p.updated_at,
+                            -- The uid is the stable identity both sides resolve a
+                            -- product by. It was missing from this list, so the till
+                            -- received '' for every row, its uid lookup could never
+                            -- match, and a product with no barcode could only ever
+                            -- be matched by name -- which collapses the several
+                            -- same-named variants a shop legitimately stocks.
+                            p.cloud_uid,
                             c.name AS category_name
                         FROM products p
                         LEFT JOIN categories c ON c.id = p.category_id
@@ -4152,20 +4159,40 @@ if (isset($_GET['api'])) {
                         if (isset($prod['image_data']) && $prod['image_data'] !== '') $cols['image_data'] = $prod['image_data'];
 
                         // Map the till's category onto an online category row.
+                        //
+                        // The two systems do NOT share a category id space: "Baby
+                        // Essentials" is category 6 on the till and category 7881
+                        // here. Resolving the pushed `category_id` against this
+                        // table therefore never matched anything, so $catId came
+                        // back null and -- because the old code assigned
+                        // $cols['category_id'] unconditionally -- every pushed
+                        // product had its real online category overwritten with
+                        // NULL, dropping it out of its category entirely.
+                        //
+                        // (store_id, name) is the only key that means the same thing
+                        // on both sides, so it is the primary lookup. The numeric id
+                        // is kept only as a last resort AND is scoped to the store,
+                        // because an unscoped `WHERE id = ?` could match a category
+                        // belonging to a different store and file the product there.
                         $catId = null;
-                        if (!empty($prod['category_id'])) {
-                            $ct = $db->prepare("SELECT id FROM categories WHERE id=?");
-                            $ct->execute([(int)$prod['category_id']]);
+                        $catName = trim((string)($prod['category_name'] ?? ''));
+                        if ($catName !== '') {
+                            // COLLATE-free, case-insensitive on both engines.
+                            $ct = $db->prepare("SELECT id FROM categories WHERE store_id=? AND LOWER(TRIM(name))=LOWER(TRIM(?)) LIMIT 1");
+                            $ct->execute([$chgSid, $catName]);
                             $foundCat = $ct->fetchColumn();
                             $catId = ($foundCat !== false && $foundCat !== null) ? (int)$foundCat : null;
                         }
-                        if ($catId === null && !empty($prod['category_name'])) {
-                            $ct = $db->prepare("SELECT id FROM categories WHERE store_id=? AND name=? LIMIT 1");
-                            $ct->execute([$chgSid, (string)$prod['category_name']]);
+                        if ($catId === null && !empty($prod['category_id'])) {
+                            $ct = $db->prepare("SELECT id FROM categories WHERE id=? AND store_id=?");
+                            $ct->execute([(int)$prod['category_id'], $chgSid]);
                             $foundCat = $ct->fetchColumn();
                             $catId = ($foundCat !== false && $foundCat !== null) ? (int)$foundCat : null;
                         }
-                        $cols['category_id'] = $catId;
+                        // Only assign when something was actually resolved. Leaving
+                        // the column out of $cols keeps the category the online row
+                        // already has, instead of nulling a correct one out.
+                        if ($catId !== null) { $cols['category_id'] = $catId; }
 
                         if ($targetId > 0) {
                             // Adopt the till's uid if this legacy online row never
