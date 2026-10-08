@@ -232,7 +232,14 @@ define('DB_PASS', getenv('DB_PASS') ?: '');
 // installDB()'s ~100 statements need to actually run again. Forgetting to
 // bump this after adding new schema changes means those changes won't take
 // effect on an already-deployed database until this number goes up.
-define('SCHEMA_VERSION', 10);
+//
+// 10 -> 11: this online file had added a long run of products columns
+// (cloud_uid, store_id, brand, supplier, unit_type, unit_size, image_path,
+// low_stock_threshold, promo_*, pack_*, case_*) without ever bumping the
+// version. A database that reached version 10 therefore skipped installDB()
+// from then on, so those columns were never added -- which is precisely what
+// made the sync push of a product fail with "column ... does not exist".
+define('SCHEMA_VERSION', 11);
 
 // ── BREVO CONFIG (for Forgot Password emails) ──
 // Reads from server environment variables (Render Dashboard -> Environment) or local .env
@@ -1732,6 +1739,30 @@ function installDB(): void
         $db->exec("CREATE INDEX IF NOT EXISTS idx_products_store_name ON products (store_id, name)");
     } catch (Exception $e) {
     }
+    // The two columns the sync push resolves EVERY changed product by. Without
+    // these, each of those lookups was a full scan of products, so one push
+    // carrying 50 changes meant 50 sequential scans of the whole catalog.
+    // cloud_uid is the primary identity and is hit first; barcode is the
+    // fallback for legacy rows that predate it. Partial (WHERE col IS NOT
+    // NULL) because most rows have no barcode, and indexing the NULL majority
+    // would only bloat the index.
+    try {
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_products_store_uid ON products (store_id, cloud_uid) WHERE cloud_uid IS NOT NULL");
+    } catch (Exception $e) {
+        // Engines without partial indexes still get the plain composite one.
+        try {
+            $db->exec("CREATE INDEX IF NOT EXISTS idx_products_store_uid ON products (store_id, cloud_uid)");
+        } catch (Exception $e2) {
+        }
+    }
+    try {
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_products_store_barcode ON products (store_id, barcode) WHERE barcode IS NOT NULL");
+    } catch (Exception $e) {
+        try {
+            $db->exec("CREATE INDEX IF NOT EXISTS idx_products_store_barcode ON products (store_id, barcode)");
+        } catch (Exception $e2) {
+        }
+    }
     try {
         $db->exec("CREATE INDEX IF NOT EXISTS idx_warehouse_product ON warehouse (product_id)");
     } catch (Exception $e) {
@@ -2090,11 +2121,46 @@ function installDB(): void
         } catch (Exception $e) {
         }
     }
-    // Mark this version as successfully installed — the caller compares
-    // this against SCHEMA_VERSION and only invokes installDB() again once
-    // that constant is bumped for a future deploy that adds new tables/
-    // columns. Until then, every other request skips straight past it.
-    $db->exec("UPDATE schema_meta SET version = " . SCHEMA_VERSION . " WHERE id = 1");
+    // Only stamp the version when the columns the sync write path actually
+    // needs are REALLY there.
+    //
+    // Stamping it unconditionally is what turned a single failed ALTER into a
+    // permanent one: schema_meta then read "current", the gate skipped
+    // installDB() forever after, and the database stayed broken until someone
+    // hand-edited the version number. Leaving it unstamped costs one extra
+    // migration run and is the only thing that lets a transient failure (a
+    // rolled-back transaction, a revoked grant, a dropped connection) heal
+    // itself on the next request instead of needing a human.
+    $productColumnGaps = [];
+    try {
+        $haveCols = [];
+        foreach ($db->query(
+            "SELECT column_name FROM information_schema.columns "
+            . "WHERE table_schema = current_schema() AND table_name = 'products'"
+        )->fetchAll(PDO::FETCH_COLUMN) as $c) {
+            $haveCols[strtolower((string)$c)] = true;
+        }
+        foreach ([
+            'name', 'store_id', 'cloud_uid', 'barcode', 'price', 'cost_price',
+            'quantity', 'store_quantity', 'category_id', 'image_path', 'image_data',
+            'unit_type', 'unit_size', 'low_stock_threshold', 'brand', 'supplier',
+            'promo_price', 'pack_qty', 'pack_barcode', 'pack_price',
+            'case_qty', 'case_barcode', 'case_price',
+        ] as $needed) {
+            if (!isset($haveCols[$needed])) $productColumnGaps[] = 'products.' . $needed;
+        }
+    } catch (\Throwable $e) {
+        // Can't introspect (locked/permission) -- don't block the stamp on that.
+        $productColumnGaps = [];
+    }
+
+    if ($productColumnGaps) {
+        error_log('[schema] NOT recording version ' . SCHEMA_VERSION
+            . ' because the migration is incomplete: ' . implode(', ', $productColumnGaps)
+            . '. It will be retried on the next request.');
+    } else {
+        $db->exec("UPDATE schema_meta SET version = " . SCHEMA_VERSION . " WHERE id = 1");
+    }
 }
 
 // ── JSON RESPONSE ──
@@ -2319,24 +2385,76 @@ function currentStoreId(): int
 }
 
 // ── SALES RETENTION & CLEANUP HELPERS ──
+/**
+ * Per-request memo for getStoreSettingVal().
+ *
+ * This was previously a bare SELECT run on EVERY call, and settings are read
+ * far more often than they are written: checkAutoSalesCleanup() alone reads
+ * three separate keys (auto_cleanup_enabled, sales_retention_days,
+ * last_sales_cleanup) at the top of both get_stats and get_transactions --
+ * the two hottest read endpoints -- and the dashboard/page render reads
+ * currency, shop_name, logo and tax rates on top of that. Each of those was
+ * an extra round trip to a REMOTE PostgreSQL instance on every single request,
+ * for data that cannot change mid-request.
+ *
+ * The cache lives only for the duration of one request (a static local in the
+ * function), so nothing is shared between users and there is no cross-request
+ * staleness window at all. Anything that writes a setting must call
+ * clearStoreSettingCache() so later reads in the SAME request see the new
+ * value -- see pruneOldSales() and the save_settings / upload_shop_logo /
+ * remove_shop_logo cases, which are the online writers of these keys.
+ */
+function clearStoreSettingCache(?int $storeId = null): void
+{
+    // Clear everything. The memo is small (a handful of keys per store) and a
+    // save request touches one store, so a selective wipe would add branching
+    // for no measurable benefit.
+    $GLOBALS['__store_setting_memo'] = [];
+}
+
+/**
+ * Read one store setting, memoized for the remainder of this request.
+ *
+ * The currency fixup is applied AFTER the cache so an empty/corrupt stored
+ * value still resolves to '₱' exactly as before -- caching must not change the
+ * returned value for any input.
+ */
 function getStoreSettingVal(string $key, string $default = '', ?int $storeId = null): string
 {
     $sid = ($storeId && $storeId > 0) ? $storeId : (loggedIn() ? currentStoreId() : 1);
+    if (!isset($GLOBALS['__store_setting_memo']) || !is_array($GLOBALS['__store_setting_memo'])) {
+        $GLOBALS['__store_setting_memo'] = [];
+    }
+    $memoKey = $sid . "\0" . $key;
+    if (array_key_exists($memoKey, $GLOBALS['__store_setting_memo'])) {
+        $raw = $GLOBALS['__store_setting_memo'][$memoKey];
+        if ($raw === null) {
+            return ($key === 'currency') ? '₱' : $default;
+        }
+        $strVal = (string)$raw;
+        if ($key === 'currency' && ($strVal === '' || str_contains($strVal, '?') || $strVal === 'PHP')) {
+            return '₱';
+        }
+        return $strVal;
+    }
+    $raw = null;
     try {
         $stmt = db()->prepare("SELECT value FROM settings WHERE (store_id = ? OR (store_id IS NULL AND ? = 1)) AND key = ? ORDER BY store_id ASC NULLS LAST LIMIT 1");
         $stmt->execute([$sid, $sid, $key]);
         $val = $stmt->fetchColumn();
         if ($val !== false && $val !== null) {
-            $strVal = (string)$val;
-            if ($key === 'currency' && ($strVal === '' || str_contains($strVal, '?') || $strVal === 'PHP')) {
-                return '₱';
-            }
-            return $strVal;
+            $raw = (string)$val;
         }
     } catch (\Throwable $e) {
     }
-    if ($key === 'currency') return '₱';
-    return $default;
+    $GLOBALS['__store_setting_memo'][$memoKey] = $raw;
+    if ($raw === null) {
+        return ($key === 'currency') ? '₱' : $default;
+    }
+    if ($key === 'currency' && ($raw === '' || str_contains($raw, '?') || $raw === 'PHP')) {
+        return '₱';
+    }
+    return $raw;
 }
 
 function pruneOldSales(?int $storeId = null, ?int $forceDays = null): array
@@ -2448,6 +2566,10 @@ function pruneOldSales(?int $storeId = null, ?int $forceDays = null): array
     $updStmt = $db->prepare("INSERT INTO settings (store_id, key, value) VALUES (?, 'last_sales_cleanup', ?) ON CONFLICT (store_id, key) DO UPDATE SET value = EXCLUDED.value");
     $updStmt->execute([$sid, $nowStr]);
     unset($_SESSION['store_settings_' . $sid]);
+    // last_sales_cleanup just changed; drop the per-request memo so a second
+    // checkAutoSalesCleanup() in the SAME request sees the new timestamp
+    // instead of the pre-prune one and immediately pruning again.
+    clearStoreSettingCache();
 
     return [
         'success' => true,
@@ -2458,6 +2580,102 @@ function pruneOldSales(?int $storeId = null, ?int $forceDays = null): array
     ];
 }
 
+/**
+ * Atomically claim the daily cleanup slot for a store.
+ *
+ * Returns true for EXACTLY ONE caller per 24h window. The claim is done with a
+ * conditional UPDATE (not a SELECT-then-UPDATE) so concurrent requests racing
+ * through checkAutoSalesCleanup() cannot all decide they are the winner.
+ *
+ * The stored timestamp is advanced at CLAIM time rather than at the end of the
+ * prune. A prune that then dies is logged and retried on the next window
+ * instead of hammering the database on every subsequent request.
+ */
+function claimSalesCleanupSlot(int $sid, int $windowSeconds = 86400): bool
+{
+    try {
+        $db = db();
+        $isMysql = ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql');
+        $now = date('Y-m-d H:i:s');
+        $cutoff = date('Y-m-d H:i:s', time() - $windowSeconds);
+        $keyCol = $isMysql ? '`key`' : '"key"';
+
+        // Only claim while the stored value is still older than the cutoff.
+        // An empty/NULL value means "never cleaned" and is eligible.
+        $sql = "UPDATE settings SET value = ? WHERE store_id = ? AND {$keyCol} = 'last_sales_cleanup'"
+             . " AND (value IS NULL OR value = '' OR value < ?)";
+        $upd = $db->prepare($sql);
+        $upd->execute([$now, $sid, $cutoff]);
+        if ($upd->rowCount() > 0) return true;
+
+        // No claimable row. Either another request just claimed it, or the row
+        // has never been created -- try to create it, and win only if we are the
+        // process that actually inserted the row.
+        if ($isMysql) {
+            $ins = $db->prepare("INSERT IGNORE INTO settings (store_id, {$keyCol}, value) VALUES (?, 'last_sales_cleanup', ?)");
+        } else {
+            $ins = $db->prepare("INSERT INTO settings (store_id, {$keyCol}, value) VALUES (?, 'last_sales_cleanup', ?) ON CONFLICT (store_id, {$keyCol}) DO NOTHING");
+        }
+        $ins->execute([$sid, $now]);
+        return $ins->rowCount() === 1;
+    } catch (\Throwable $e) {
+        // If we cannot claim we must NOT prune -- that would reintroduce the
+        // concurrent-prune storm this function exists to prevent.
+        error_log('[claimSalesCleanupSlot] ' . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * Run a claimed prune AFTER the response has been flushed to the client.
+ *
+ * pruneOldSales() archives monthly totals and then DELETEs every transaction
+ * older than the retention window. That is inherently multi-minute on a remote
+ * PostgreSQL instance, and it used to run inline at the top of get_stats /
+ * get_transactions -- so whichever unlucky request happened to be the first
+ * after the 24h mark sat there for minutes holding the user's UI hostage.
+ *
+ * fastcgi_finish_request() hands the response back immediately; the prune then
+ * runs during shutdown while the user is already looking at their dashboard.
+ */
+function scheduleDeferredSalesPrune(int $sid, int $days): void
+{
+    static $scheduled = false;
+    if ($scheduled) return; // one deferral per request is plenty
+    $scheduled = true;
+
+    $runPrune = function () use ($sid, $days) {
+        try {
+            pruneOldSales($sid, $days);
+        } catch (\Throwable $e) {
+            error_log('[deferredSalesPrune] ' . $e->getMessage());
+        }
+    };
+
+    if (function_exists('fastcgi_finish_request')) {
+        register_shutdown_function(function () use ($runPrune) {
+            ignore_user_abort(true);
+            // fastcgi_finish_request() flushes the response and closes the
+            // connection to the client, then returns. Do NOT clear the output
+            // buffers first -- these hooks also fire on full HTML page renders,
+            // and discarding a buffer there would blank the page.
+            if (!@fastcgi_finish_request()) return;
+            $runPrune();
+        });
+    } else {
+        // No FastCGI (Apache/mod_php, PHP CLI): we cannot cut the response
+        // short, but deferring to shutdown at least keeps it off the query path.
+        register_shutdown_function($runPrune);
+    }
+}
+
+/**
+ * Cheap eligibility check for the daily sales prune.
+ *
+ * Every step here is O(1): the three setting reads are served by the
+ * per-request memo, and the claim is a single conditional UPDATE. The expensive
+ * work is deferred, so no read endpoint ever blocks on it.
+ */
 function checkAutoSalesCleanup(?int $storeId = null): void
 {
     $sid = ($storeId && $storeId > 0) ? $storeId : (loggedIn() ? currentStoreId() : 1);
@@ -2467,11 +2685,13 @@ function checkAutoSalesCleanup(?int $storeId = null): void
     if ($days <= 0) return;
     $last = getStoreSettingVal('last_sales_cleanup', '', $sid);
     if ($last !== '' && (time() - strtotime($last)) < 86400) return;
-    try {
-        pruneOldSales($sid, $days);
-    } catch (\Throwable $e) {
-        error_log('[checkAutoSalesCleanup] ' . $e->getMessage());
-    }
+
+    // Only let a small share of eligible requests even attempt the claim, so a
+    // burst of concurrent requests cannot serialise behind one winner.
+    if (mt_rand(1, 100) > 5) return;
+
+    if (!claimSalesCleanupSlot($sid)) return; // someone else already won today
+    scheduleDeferredSalesPrune($sid, $days);
 }
 
 // ── LOGIN RATE LIMITING ──
@@ -2950,6 +3170,56 @@ function createDeliveryWithBatches(PDO $db, ?string $supplierRef, ?string $event
     return $deliveryId;
 }
 
+/**
+ * Makes sure a cloud_sync_* request never runs against a stale schema.
+ *
+ * The sync endpoints are dispatched from the API router, which json()s and
+ * exits long before the page-render schema gate near the bottom of this file
+ * ever runs. installDB() was therefore unreachable from a sync request, so a
+ * database sitting one version behind simply stayed behind: every product push
+ * threw "column ... of relation products does not exist", the per-change catch
+ * swallowed that into error_log(), the change was never acknowledged, and a
+ * product created or edited on a till never appeared online -- silently, on
+ * every sync, indefinitely, with the till reporting zero failures.
+ *
+ * Deliberately NOT reusing $_SESSION['schema_ok_version']: these endpoints are
+ * authenticated by the X-Sync-Token header and never carry a session, so that
+ * cache could never help them. The whole cost is one cheap read per request,
+ * paid only until the recorded version matches.
+ */
+function ensureSyncEndpointSchema(PDO $db): void
+{
+    static $done = false;
+    if ($done) return;
+    $done = true;
+
+    // This installer is the PostgreSQL branch only -- the online app is
+    // PostgreSQL by definition (Render/Supabase). Running it against any other
+    // engine would execute pgsql-only DDL, so mirror the page-render gate and
+    // skip. Doing nothing here is correct, not a gap.
+    if ($db->getAttribute(PDO::ATTR_DRIVER_NAME) !== 'pgsql') return;
+
+    $installed = null;
+    try {
+        $installed = $db->query("SELECT version FROM schema_meta WHERE id = 1")->fetchColumn();
+    } catch (\Throwable $e) {
+        $installed = null;          // no schema_meta row yet -> treat as fresh
+    }
+    // "<" rather than "!=": a database recorded AHEAD of this code already has
+    // every column this code knows about, so re-running the whole migration
+    // would buy nothing and would only add latency to every sync.
+    if ($installed !== null && (int)$installed >= SCHEMA_VERSION) return;
+
+    try {
+        installDB();
+        error_log('[cloud_sync] ran installDB(): schema_meta was '
+            . ($installed === null ? 'absent' : (int)$installed)
+            . ', expected ' . SCHEMA_VERSION);
+    } catch (\Throwable $e) {
+        error_log('[cloud_sync] installDB() failed: ' . $e->getMessage());
+    }
+}
+
 // ═══════════════════════════════════════════════════
 //  API HANDLER
 // ═══════════════════════════════════════════════════
@@ -2998,6 +3268,12 @@ if (isset($_GET['api'])) {
             $db = db();
             $body = json_decode(file_get_contents('php://input'), true) ?? [];
             $syncStoreId = 1;
+
+            // Run before any query below. This is the whole fix for products
+            // created/edited on a till never showing up online: the handler can
+            // only write columns that exist, and nothing else on this request
+            // path was ever going to add them.
+            ensureSyncEndpointSchema($db);
 
             if ($action === 'cloud_sync_ping') {
                 $storeName = 'Online Store';
@@ -3536,7 +3812,17 @@ if (isset($_GET['api'])) {
                             p.id, p.name, p.barcode, p.description, p.price, p.cost_price,
                             p.promo_price, p.store_quantity, p.quantity,
                             COALESCE(ws.quantity, 0) AS warehouse_quantity,
-                            p.image_path, p.image_data, p.unit_type, p.unit_size,
+                            p.image_path,
+                            -- Only materialise the base64 blob when there is no
+                            -- path to use. Selecting p.image_data unconditionally
+                            -- pulled every product's photo (50-150KB apiece) out
+                            -- of Postgres on EVERY sync and then dropped it for
+                            -- each row that already had a path -- tens of MB of
+                            -- pure waste per pull, which is most of why a sync
+                            -- against a real catalog felt so slow.
+                            CASE WHEN p.image_path IS NULL OR p.image_path = ''
+                                 THEN p.image_data ELSE NULL END AS image_data,
+                            p.unit_type, p.unit_size,
                             p.pack_qty, p.pack_barcode, p.pack_price,
                             p.case_qty, p.case_barcode, p.case_price,
                             p.low_stock_threshold, p.expiry_date, p.delivery_date,
@@ -3686,10 +3972,27 @@ if (isset($_GET['api'])) {
                     if ($txStmt) {
                         $rawTxs = $txStmt->fetchAll(PDO::FETCH_ASSOC);
                         if (!empty($rawTxs)) {
-                            $itemStmt = $db->prepare("SELECT * FROM transaction_items WHERE transaction_id = ?");
+                            // One query for every transaction's lines, not one
+                            // query per transaction. The old loop issued up to
+                            // 200 sequential round trips to the cloud on every
+                            // single pull, which dominated the sync's runtime.
+                            $txIds = [];
                             foreach ($rawTxs as $rtx) {
-                                $itemStmt->execute([$rtx['id']]);
-                                $rtx['items'] = $itemStmt->fetchAll(PDO::FETCH_ASSOC);
+                                $txIds[] = (int)$rtx['id'];
+                            }
+                            $itemsByTx = [];
+                            if (!empty($txIds)) {
+                                $inPh = implode(',', array_fill(0, count($txIds), '?'));
+                                $allItems = $db->prepare(
+                                    "SELECT * FROM transaction_items WHERE transaction_id IN ({$inPh})"
+                                );
+                                $allItems->execute($txIds);
+                                foreach ($allItems->fetchAll(PDO::FETCH_ASSOC) as $it) {
+                                    $itemsByTx[(int)$it['transaction_id']][] = $it;
+                                }
+                            }
+                            foreach ($rawTxs as $rtx) {
+                                $rtx['items'] = $itemsByTx[(int)$rtx['id']] ?? [];
                                 $recentTransactions[] = $rtx;
                             }
                         }
@@ -3763,6 +4066,9 @@ if (isset($_GET['api'])) {
                 // the entire push.
                 $appliedIds = [];
                 $idMap = [];
+                // Products the server could NOT apply. Reported back so the
+                // till can show a real failure instead of a clean summary.
+                $productErrors = [];
                 $changeList = is_array($body['product_changes'] ?? null) ? $body['product_changes'] : [];
                 foreach ($changeList as $chg) {
                     try {
@@ -3899,7 +4205,18 @@ if (isset($_GET['api'])) {
                             'cloud_id' => (int)$targetId,
                         ];
                     } catch (\Throwable $oneErr) {
+                        // Was swallowed into error_log() and nothing more. The
+                        // response still said success, so the till cleared its
+                        // counters, reported zero failures, and the operator saw
+                        // a product that had silently never arrived. Recording it
+                        // here is what makes that state diagnosable from the UI.
                         error_log('cloud_sync_push product apply error: ' . $oneErr->getMessage());
+                        $productErrors[] = [
+                            'outbox_id'         => (int)($chg['outbox_id'] ?? 0),
+                            'local_product_id'  => (int)($chg['local_product_id'] ?? 0),
+                            'product_name'      => (string)($prod['name'] ?? ''),
+                            'message'           => $oneErr->getMessage(),
+                        ];
                     }
                 }
 
@@ -4318,6 +4635,10 @@ $txList = $body['transactions'] ?? [];
                     'applied_ids'  => array_values(array_filter($appliedIds)),
                     'id_map'       => $idMap,
                     'applied_products' => count(array_filter($appliedIds)),
+                    // Non-empty means some products did NOT reach the cloud and
+                    // stay queued on the till. Surfaced so this is diagnosable
+                    // without server log access.
+                    'product_errors' => $productErrors,
                     'applied_delivery_ids' => $appliedDeliveryIds,
                     'applied_movement_ids' => $appliedMovementIds,
                 ]);
@@ -4567,10 +4888,32 @@ $txList = $body['transactions'] ?? [];
                 if (!$bc) json(false, null, 'No barcode');
                 $sid = currentStoreId();
                 $matchedUnit = 'piece';
-                // Exact match first
-                $stmt = $db->prepare("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE p.store_id=? AND TRIM(p.barcode)=? LIMIT 1");
-                $stmt->execute([$sid, $bc]);
-                $prod = $stmt->fetch();
+
+                // FAST PATH — index-backed exact match.
+                //
+                // Every fallback below wraps the column in TRIM()/LOWER(), which makes
+                // the predicate non-sargable: PostgreSQL cannot use
+                // idx_products_store_barcode for them and falls back to a sequential
+                // scan of the store's products on EVERY scan. Since a scanner emits
+                // exactly the stored digits (and the input was already stripped of
+                // control chars above), the overwhelmingly common case is a
+                // byte-exact hit, which the plain equality below resolves with an
+                // index lookup plus LIMIT 1.
+                //
+                // This is a fast path, not a replacement: on a miss the original
+                // trim / case-insensitive / reverse chain still runs, so barcodes
+                // saved with stray whitespace or mixed case keep resolving exactly
+                // as before.
+                $stmtFast = $db->prepare("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE p.store_id=? AND p.barcode=? LIMIT 1");
+                $stmtFast->execute([$sid, $bc]);
+                $prod = $stmtFast->fetch();
+
+                // Exact match against a whitespace-padded stored barcode.
+                if (!$prod) {
+                    $stmt = $db->prepare("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE p.store_id=? AND TRIM(p.barcode)=? LIMIT 1");
+                    $stmt->execute([$sid, $bc]);
+                    $prod = $stmt->fetch();
+                }
                 // Case-insensitive fallback
                 if (!$prod) {
                     $stmt2 = $db->prepare("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE p.store_id=? AND LOWER(TRIM(p.barcode))=LOWER(?) LIMIT 1");
@@ -5878,6 +6221,7 @@ $txList = $body['transactions'] ?? [];
                 $ssSid = currentStoreId();
                 foreach (['shop_name', 'currency', 'vat_rate', 'tax_rate', 'shop_address', 'shop_tin', 'terminal_id', 'qz_drawer_enabled', 'qz_drawer_printer', 'sales_retention_days', 'auto_cleanup_enabled'] as $k) if (isset($body[$k])) $st->execute([$ssSid, $k, (string)$body[$k]]);
                 unset($_SESSION['store_settings_' . $ssSid]); // bust the per-session settings cache so the change shows up immediately
+                clearStoreSettingCache(); // ...and the per-request memo
                 json(true, ['ok' => true]);
                 break;
 
@@ -5950,6 +6294,7 @@ $txList = $body['transactions'] ?? [];
                 $db->prepare("INSERT INTO settings(store_id,key,value) VALUES(?,'shop_logo_data',?) ON CONFLICT (store_id,key) DO UPDATE SET value=EXCLUDED.value")->execute([$logoSid, $body['image']]);
                 if ($oldRow) deleteShopLogoFile($oldRow);
                 unset($_SESSION['store_settings_' . $logoSid]); // bust the per-session settings cache
+                clearStoreSettingCache(); // ...and the per-request memo
                 json(true, ['logo_url' => $newRef]);
                 break;
 
@@ -5963,6 +6308,7 @@ $txList = $body['transactions'] ?? [];
                 $db->prepare("INSERT INTO settings(store_id,key,value) VALUES(?,'shop_logo_data','') ON CONFLICT (store_id,key) DO UPDATE SET value=EXCLUDED.value")->execute([$rmSid]);
                 if ($oldRow) deleteShopLogoFile($oldRow);
                 unset($_SESSION['store_settings_' . $rmSid]); // bust the per-session settings cache
+                clearStoreSettingCache(); // ...and the per-request memo
                 json(true, ['ok' => true]);
                 break;
 
