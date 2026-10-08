@@ -20,6 +20,34 @@ async function apiPost(url, body = {}) {
 }
 
 /* ── Telemetry auto-refresh ──────────────────────────────────── */
+/* ── Monitoring scope helpers ─────────────────────────────────────
+   The monitoring page is scoped by ?store=. Every poll MUST repeat that scope:
+   an unscoped request answers with platform totals and overwrites the one
+   store's figures on the next tick, so the widgets would silently disagree with
+   the trend chart above them. The scope is read from the URL on every call
+   rather than cached in a global, so a back/forward navigation or a
+   data-store-change link cannot leave a stale scope behind. */
+function telemetryScope() {
+  const raw = new URLSearchParams(window.location.search).get('store');
+  return raw && /^\d+$/.test(raw) ? raw : null;
+}
+
+function telemetryQuery() {
+  const s = telemetryScope();
+  return s ? '?store=' + encodeURIComponent(s) : '';
+}
+
+/* Reject a payload that answers for a DIFFERENT store than the page is showing.
+   Dropping it is always safer than painting a plausible-looking wrong number;
+   the next tick re-requests and recovers on its own. A payload carrying no
+   store_id is accepted, for compatibility with a backend that predates scoping. */
+function telemetryMatchesScope(d) {
+  const s = telemetryScope();
+  const want = s ? Number(s) : null;
+  const got  = (d && d.store_id !== undefined && d.store_id !== null) ? d.store_id : want;
+  return got === want;
+}
+
 function initTelemetry() {
   const wrap = document.getElementById('telemetry-wrap');
   if (!wrap) return;
@@ -28,9 +56,10 @@ function initTelemetry() {
     const icon = document.getElementById('refresh-icon');
     if (icon) icon.classList.add('spin');
     try {
-      const r = await fetch('/platform-admin/api/telemetry', { headers: { 'X-CSRF-Token': csrfToken() } });
+      const r = await fetch('/platform-admin/api/telemetry' + telemetryQuery(), { headers: { 'X-CSRF-Token': csrfToken() } });
       if (!r.ok) return;
       const d = await r.json();
+      if (!telemetryMatchesScope(d)) return;
       update('stat-total',    d.counts?.total            ?? '—');
       update('stat-active',   d.counts?.active           ?? '—');
       update('stat-pending',  d.counts?.pending_approval ?? '—');

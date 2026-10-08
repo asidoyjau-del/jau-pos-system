@@ -233,6 +233,24 @@ $current = (string)($s['client_type'] ?? 'web');
                   "redirect"=> "/platform-admin/stores/" . $s['id'],
                 ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('mail') ?> Send code</button>
               <?php endif; ?>
+              <?php /* Revoke is offered ONLY while a code is actually outstanding.
+                     "New code" already retires a live one as a side effect, so past
+                     that point revoke would have nothing to act on and would just
+                     be a second way to reach the same end. It is also deliberately
+                     NOT bundled with "New code": revoke has to stand alone for the
+                     case where minting a replacement is exactly what to avoid —
+                     a code that leaked to the wrong person. */ ?>
+              <?php if ($live && !$expired): ?>
+                <button class="btn btn-rose btn-sm" style="margin-left:6px" data-confirm='<?= json_encode([
+                  "title"       => "Revoke this code?",
+                  "desc"        => "This activation code stops working immediately and no replacement is issued. " . addslashes($t['full_name'] ?: $t['username']) . " will need a new code before they can activate another till.",
+                  "confirmText" => (string)$t['username'],
+                  "action"      => "/platform-admin/users/" . $t['id'] . "/pairing/revoke",
+                  "btnClass"    => "btn-rose",
+                  "btnLabel"    => "Revoke code",
+                  "redirect"    => "/platform-admin/stores/" . $s['id'],
+                ], JSON_UNESCAPED_UNICODE) ?>'>⊘ Revoke</button>
+              <?php endif; ?>
             </td>
           </tr>
         <?php endforeach; ?>

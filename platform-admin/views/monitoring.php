@@ -1,8 +1,19 @@
 <?php
-/** @var array $counts @var int $sessions @var array $volume @var array $analytics @var string $csrf @var array $admin */
+/**
+ * @var array $counts @var int $sessions @var array $volume @var array $analytics
+ * @var string $csrf @var array $admin
+ * @var array|null $store @var int|null $storeId @var array $stores @var int $now
+ */
 use ProCast\Support\View;
 $e  = [View::class, 'e'];
 $fn = fn($n) => number_format((float)$n, 2);
+
+/* Scope is optional so this view still renders from the tests, which supply only
+   counts/sessions/volume/analytics. Absent $stores simply means the selector is
+   not rendered rather than that the page is broken. */
+$stores  = $stores ?? [];
+$storeId = $storeId ?? null;
+$store   = $store  ?? null;
 
 /* Each analytics section is optional by design: an unsupported column or a failing
    query yields ['available' => false] for that card alone. Defaulting here keeps
@@ -20,6 +31,42 @@ foreach ($days as $d) {
     $peak = max($peak, (float)($d['total'] ?? 0));
 }
 ?>
+<?php /* Scope banner. Whatever the figures below say, the admin must always be
+       able to see WHICH store they describe — a monitoring page that silently
+       re-scopes is worse than one with no scope at all, because the numbers
+       still look authoritative. The "All stores" link is the only way back. */ ?>
+<div class="pa-card mb-6">
+  <div class="pa-card-header">
+    <span class="pa-card-title">Scope</span>
+  </div>
+  <div class="pa-card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <form method="GET" action="/platform-admin/monitoring" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <label class="text-muted" for="monitor-store">Store</label>
+      <select id="monitor-store" name="store" onchange="this.form.submit()"
+              style="padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);min-width:220px">
+        <option value="">All stores (platform-wide)</option>
+        <?php foreach ($stores as $s): ?>
+          <?php $sid = (int)$s['id']; ?>
+          <option value="<?= $sid ?>" <?= $sid === $storeId ? 'selected' : '' ?>>
+            <?= $e((string)(($s['display_name'] ?: $s['name']) ?: ('Store #' . $sid))) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
+      <noscript><button type="submit" class="btn btn-sm">Apply</button></noscript>
+    </form>
+    <?php if ($store !== null): ?>
+      <span class="badge badge-active" data-scope-store="<?= (int)$storeId ?>">
+        Showing <?= $e((string)(($store['display_name'] ?: $store['name']) ?: ('Store #' . (int)$storeId))) ?> only
+      </span>
+      <a href="/platform-admin/monitoring" class="btn btn-ghost btn-sm">View all stores</a>
+    <?php else: ?>
+      <span class="badge" data-scope-store="all">Showing every store</span>
+    <?php endif; ?>
+  </div>
+</div>
+<?php /* The store census is platform-wide by definition and is NOT affected by
+       the scope above; say so, so the tiles are never mistaken for filtered
+       figures while the volume cards below them are. */ ?>
 <!-- Stat tiles -->
 <div class="pa-stats" id="telemetry-wrap">
   <div class="pa-stat accent">
