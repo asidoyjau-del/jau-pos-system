@@ -6,6 +6,7 @@
  */
 use ProCast\Support\View;
 $e  = [View::class, 'e'];
+$ico = static fn (string $n, string $c = ''): string => View::icon($n, $c);
 $fn = fn($n) => number_format((float)$n, 2);
 
 /* Scope is optional so this view still renders from the tests, which supply only
@@ -31,42 +32,6 @@ foreach ($days as $d) {
     $peak = max($peak, (float)($d['total'] ?? 0));
 }
 ?>
-<?php /* Scope banner. Whatever the figures below say, the admin must always be
-       able to see WHICH store they describe — a monitoring page that silently
-       re-scopes is worse than one with no scope at all, because the numbers
-       still look authoritative. The "All stores" link is the only way back. */ ?>
-<div class="pa-card mb-6">
-  <div class="pa-card-header">
-    <span class="pa-card-title">Scope</span>
-  </div>
-  <div class="pa-card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-    <form method="GET" action="/platform-admin/monitoring" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <label class="text-muted" for="monitor-store">Store</label>
-      <select id="monitor-store" name="store" onchange="this.form.submit()"
-              style="padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);min-width:220px">
-        <option value="">All stores (platform-wide)</option>
-        <?php foreach ($stores as $s): ?>
-          <?php $sid = (int)$s['id']; ?>
-          <option value="<?= $sid ?>" <?= $sid === $storeId ? 'selected' : '' ?>>
-            <?= $e((string)(($s['display_name'] ?: $s['name']) ?: ('Store #' . $sid))) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-      <noscript><button type="submit" class="btn btn-sm">Apply</button></noscript>
-    </form>
-    <?php if ($store !== null): ?>
-      <span class="badge badge-active" data-scope-store="<?= (int)$storeId ?>">
-        Showing <?= $e((string)(($store['display_name'] ?: $store['name']) ?: ('Store #' . (int)$storeId))) ?> only
-      </span>
-      <a href="/platform-admin/monitoring" class="btn btn-ghost btn-sm">View all stores</a>
-    <?php else: ?>
-      <span class="badge" data-scope-store="all">Showing every store</span>
-    <?php endif; ?>
-  </div>
-</div>
-<?php /* The store census is platform-wide by definition and is NOT affected by
-       the scope above; say so, so the tiles are never mistaken for filtered
-       figures while the volume cards below them are. */ ?>
 <!-- Stat tiles -->
 <div class="pa-stats" id="telemetry-wrap">
   <div class="pa-stat accent">
@@ -195,6 +160,76 @@ foreach ($days as $d) {
 </div>
 <?php endif; ?>
 
+<!-- Payment methods & Order types (if available) -->
+<?php
+$pm = $splits['payment_methods'] ?? null;
+$ot = $splits['order_types'] ?? null;
+if (($splits['available'] ?? false) === true && (!empty($pm) || !empty($ot))):
+?>
+<div class="grid-2 mb-6">
+  <?php if (!empty($pm)): ?>
+  <div class="pa-card">
+    <div class="pa-card-header">
+      <span class="pa-card-title"><?= $ico('bar-chart') ?> Payment Methods</span>
+      <span class="text-muted" style="font-size:.8rem">last 14 days</span>
+    </div>
+    <div class="pa-card-body">
+      <?php $pmTotal = array_sum(array_column($pm, 'total')) ?: 1.0; ?>
+      <ul class="pa-split-list">
+        <?php foreach ($pm as $item):
+          $pct = round(($item['total'] / $pmTotal) * 100, 1);
+        ?>
+        <li class="pa-split-item">
+          <div class="pa-split-header">
+            <span class="pa-split-label"><?= $e($item['label']) ?></span>
+            <span class="pa-split-val">₱<?= $fn($item['total']) ?></span>
+          </div>
+          <div class="pa-split-sub">
+            <span><?= $e($item['count']) ?> orders</span>
+            <span><?= $pct ?>%</span>
+          </div>
+          <div class="pa-progress-wrap">
+            <div class="pa-progress-bar" style="width:<?= $pct ?>%"></div>
+          </div>
+        </li>
+        <?php endforeach; ?>
+      </ul>
+    </div>
+  </div>
+  <?php endif; ?>
+  <?php if (!empty($ot)): ?>
+  <div class="pa-card">
+    <div class="pa-card-header">
+      <span class="pa-card-title"><?= $ico('pie-chart') ?> Order Types</span>
+      <span class="text-muted" style="font-size:.8rem">last 14 days</span>
+    </div>
+    <div class="pa-card-body">
+      <?php $otTotal = array_sum(array_column($ot, 'total')) ?: 1.0; ?>
+      <ul class="pa-split-list">
+        <?php foreach ($ot as $item):
+          $pct = round(($item['total'] / $otTotal) * 100, 1);
+        ?>
+        <li class="pa-split-item">
+          <div class="pa-split-header">
+            <span class="pa-split-label"><?= $e($item['label']) ?></span>
+            <span class="pa-split-val">₱<?= $fn($item['total']) ?></span>
+          </div>
+          <div class="pa-split-sub">
+            <span><?= $e($item['count']) ?> orders</span>
+            <span><?= $pct ?>%</span>
+          </div>
+          <div class="pa-progress-wrap">
+            <div class="pa-progress-bar emerald" style="width:<?= $pct ?>%"></div>
+          </div>
+        </li>
+        <?php endforeach; ?>
+      </ul>
+    </div>
+  </div>
+  <?php endif; ?>
+</div>
+<?php endif; ?>
+
 <!-- Health widget -->
 <div class="pa-card mb-6">
   <div class="pa-card-header">
@@ -217,6 +252,9 @@ foreach ($days as $d) {
     <span class="pa-card-title"> Quick actions</span>
   </div>
   <div class="pa-card-body flex gap-3" style="flex-wrap:wrap">
+    <a href="/platform-admin/analytics<?= $storeId !== null ? '?store=' . (int)$storeId : '' ?>" class="btn btn-primary">
+       <?= $ico('bar-chart') ?> Detailed Analytics
+    </a>
     <a href="/platform-admin/stores?status=pending_approval" class="btn btn-amber">
        Review Pending (<?= $e($counts['pending_approval']) ?>)
     </a>

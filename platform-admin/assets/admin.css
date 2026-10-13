@@ -93,7 +93,7 @@ body{
   /* Same treatment as the POS .public-auth-bg: dimmed hero photo, fixed so it
      stays put while the tables scroll. */
   background-color:var(--bg-base);
-  background-image:linear-gradient(var(--veil-a),var(--veil-b)),url('/platform-admin/assets/pos-background.webp');
+  background-image:linear-gradient(var(--veil-a),var(--veil-b)),url('pos-background.webp');
   background-size:cover;
   background-position:center;
   background-attachment:fixed;
@@ -246,7 +246,7 @@ textarea.form-control{resize:vertical;min-height:80px}
    this wrapper would paint over it with a flat --bg-base and the brand image
    would be missing on the two pages users see first. */
 .pa-login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;
-  background-image:linear-gradient(var(--veil-a),var(--veil-b)),url('/platform-admin/assets/pos-background.webp');
+  background-image:linear-gradient(var(--veil-a),var(--veil-b)),url('pos-background.webp');
   background-size:cover;background-position:center;background-attachment:fixed;padding:24px}
 .pa-login-box{width:100%;max-width:400px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-lg);padding:38px 36px;box-shadow:var(--shadow-lg);backdrop-filter:blur(20px);animation:slideUp .4s ease}
 @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
@@ -423,3 +423,26 @@ html.theme-light     .pa-theme-toggle .pa-theme-icon.is-dark{display:inline-flex
 /* Login-page placement: pinned to the viewport corner so it stays reachable
    however short the box is, and kept clear of the centred .pa-login-wrap. */
 .login-theme-toggle{position:fixed;top:16px;right:16px;z-index:50}
+
+/* ── Analytics splits, progress bars and range filters ───────────────────── */
+.pa-range-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.pa-range-pill{padding:6px 14px;border-radius:100px;font-size:.78rem;font-weight:600;background:rgba(255,255,255,.05);color:var(--text-3);border:1px solid var(--border);text-decoration:none;transition:all var(--transition)}
+html.theme-light .pa-range-pill{background:rgba(0,0,0,.03)}
+.pa-range-pill:hover{background:rgba(47,127,245,.1);color:var(--text-2);border-color:var(--accent)}
+.pa-range-pill.active{background:rgba(47,127,245,.2);color:var(--accent-h);border-color:var(--accent-h)}
+
+.pa-split-list{list-style:none;margin:0;padding:0}
+.pa-split-item{padding:10px 0;border-bottom:1px solid var(--border)}
+.pa-split-item:last-child{border-bottom:0}
+.pa-split-header{display:flex;justify-content:space-between;align-items:center;font-size:.875rem}
+.pa-split-label{font-weight:600;color:var(--text-1)}
+.pa-split-val{font-weight:700;color:var(--emerald)}
+.pa-split-sub{font-size:.75rem;color:var(--text-3);display:flex;justify-content:space-between;margin-top:2px}
+
+.pa-progress-wrap{width:100%;height:6px;background:rgba(255,255,255,.08);border-radius:100px;overflow:hidden;margin-top:6px}
+html.theme-light .pa-progress-wrap{background:rgba(0,0,0,.08)}
+.pa-progress-bar{height:100%;border-radius:100px;background:var(--accent);transition:width .3s ease}
+.pa-progress-bar.emerald{background:var(--emerald)}
+.pa-progress-bar.amber{background:var(--amber)}
+.pa-progress-bar.violet{background:var(--violet)}
+

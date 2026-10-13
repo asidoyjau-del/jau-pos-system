@@ -41,6 +41,9 @@ $navActive = $nav ?? '';
       <a href="/platform-admin/monitoring" class="pa-nav-link <?= $navActive==='monitoring'?'active':'' ?>">
         <span class="pa-nav-icon"><?= $ico('activity') ?></span> Monitoring
       </a>
+      <a href="/platform-admin/analytics" class="pa-nav-link <?= $navActive==='analytics'?'active':'' ?>">
+        <span class="pa-nav-icon"><?= $ico('bar-chart') ?></span> Analytics
+      </a>
       <a href="/platform-admin/stores" class="pa-nav-link <?= $navActive==='stores'?'active':'' ?>">
         <span class="pa-nav-icon"><?= $ico('store') ?></span> Stores
       </a>
