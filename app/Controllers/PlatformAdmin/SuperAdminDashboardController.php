@@ -62,6 +62,46 @@ final class SuperAdminDashboardController
         ]);
     }
 
+    // ── Analytics ──────────────────────────────────────────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function analyticsPage(Request $req, array &$session, array $admin, int $now): Response
+    {
+        $scope   = $this->resolveStoreScope($req);
+        $store   = $scope['store'];
+        $storeId = $store === null ? null : (int)$store['id'];
+
+        if ($scope['invalid'] === true) {
+            return Response::notFound();
+        }
+
+        $rawDays = (int)($req->queryStr('days') ?: 14);
+        $days = in_array($rawDays, [7, 14, 30, 60, 90], true) ? $rawDays : 14;
+
+        return $this->page('analytics', $session, $admin,
+            $store === null ? 'Platform Analytics' : 'Analytics — ' . (string)($store['display_name'] ?: $store['name']),
+            'analytics', [
+            'counts'    => $this->stores->counts(),
+            'sessions'  => $this->stores->activeSessions($now, $storeId),
+            'volume'    => $this->stores->volume($now, $storeId),
+            'analytics' => $this->stores->analytics($now, $days, $storeId),
+            'store'     => $store,
+            'storeId'   => $storeId,
+            'stores'    => $this->stores->list(null, '', 200),
+            'days'      => $days,
+            'now'       => $now,
+        ]);
+    }
+
+    private function resolveStoreScope(Request $req): array
+    {
+        $raw = trim((string)$req->queryStr('store'));
+        if ($raw === '' || !ctype_digit($raw)) {
+            return ['store' => null, 'invalid' => false];
+        }
+        $store = $this->stores->find((int)$raw);
+        return ['store' => $store, 'invalid' => $store === null];
+    }
+
     /**
      * Resolves the ?store= monitoring filter to a real, existing store row.
      *

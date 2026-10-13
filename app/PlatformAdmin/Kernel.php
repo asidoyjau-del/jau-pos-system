@@ -121,6 +121,8 @@ final class Kernel
                     return Response::redirect('/monitoring');
                 case $path === '/monitoring':
                     return $dash->monitoring($req, $session, $admin, $now);
+                case $path === '/analytics':
+                    return $dash->analyticsPage($req, $session, $admin, $now);
                 case $path === '/api/telemetry':
                     // $req is passed so the poll can honour the same ?store= scope
                     // as the page; otherwise it would overwrite a store's figures
