@@ -213,6 +213,9 @@ final class Kernel
     {
         $file = PROCAST_ROOT . '/platform-admin/assets/' . $name;
         if (!is_file($file)) {
+            $file = PROCAST_ROOT . '/assets/' . $name;
+        }
+        if (!is_file($file)) {
             return Response::notFound();
         }
         $r = new Response(200, '', ['Content-Type' => self::ASSETS[$name], 'Cache-Control' => 'private, max-age=300']);

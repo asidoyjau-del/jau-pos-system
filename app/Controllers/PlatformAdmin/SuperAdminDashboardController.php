@@ -449,30 +449,36 @@ final class SuperAdminDashboardController
             'ttl_seconds' => $ttl,
         ]);
 
-        // Send to the account holder; fall back to the owner (notifyOwner already
-        // audits success/failure and handles a missing address).
+        // Send to the account holder; fall back to the owner when the account
+        // has no email of its own (e.g. cashier accounts without personal email).
         $target = trim((string)($user['email'] ?? ''));
+        $recipientName = (string)($user['full_name'] ?? '');
+        $isOwnerFallback = false;
+        if ($target === '' && !empty($store['owner_email'])) {
+            $target = trim((string)$store['owner_email']);
+            $recipientName = (string)($store['owner_name'] ?? 'Store Owner');
+            $isOwnerFallback = true;
+        }
+
         $mailNote = '';
         if ($target !== '') {
-            [$ok, $msg] = Mailer::send($target, (string)($user['full_name'] ?? ''), 'Your ProCast activation code', sprintf(
-                '<p>Hello %s,</p>'
-                . '<p>Your activation code for your ProCast account <strong>%s</strong> is:</p>'
-                . '<p style="font-size:28px;font-weight:800;letter-spacing:.3em;margin:20px 0;">%s</p>'
+            $intro = $isOwnerFallback
+                ? sprintf('<p>Hello %s,</p><p>An activation code was requested for your store\'s account <strong>%s</strong> (role: <strong>%s</strong>):</p>', View::e($recipientName), View::e($user['username']), View::e($role ?: 'cashier'))
+                : sprintf('<p>Hello %s,</p><p>Your activation code for your ProCast account <strong>%s</strong> is:</p>', View::e($recipientName), View::e($user['username']));
+
+            [$ok, $msg] = Mailer::send($target, $recipientName, 'Your ProCast activation code',
+                $intro
+                . '<p style="font-size:28px;font-weight:800;letter-spacing:.3em;margin:20px 0;color:#2f7ff5;">' . View::e($code) . '</p>'
                 . '<p>Open ProCast on the computer you use at the till, enter this code when asked, '
-                . 'then sign in with your username and password. It works <strong>once</strong>, '
-                . 'and expires on <strong>%s UTC</strong>.</p>'
-                . '<p>You only need it the first time &mdash; your computer stays activated.</p>',
-                View::e($user['full_name'] ?? ''),
-                View::e($user['username']),
-                View::e($code),
-                View::e(gmdate('Y-m-d H:i', time() + $ttl))
-            ));
+                . 'then sign in with the username and password. It works <strong>once</strong>, '
+                . 'and expires on <strong>' . View::e(gmdate('Y-m-d H:i', time() + $ttl)) . ' UTC</strong>.</p>'
+                . '<p>You only need it the first time &mdash; your computer stays activated.</p>'
+            );
             Audit::log($this->db, (int)$admin['id'], $ok ? Audit::EMAIL_SENT : Audit::EMAIL_FAILED, $storeId, $req->ip, $req->userAgent, ['subject' => 'activation code', 'user_id' => $userId, 'result' => $ok ? 'sent' : $msg]);
-            // When the mail fails the admin screen is the ONLY channel left, so
-            // say that plainly instead of quietly reporting a send failure.
-            $mailNote = $ok ? 'Code emailed to ' . $target . '.' : 'Email FAILED (' . $msg . ') — read or copy the code below and send it to them yourself.';
+            $recipientDesc = $isOwnerFallback ? 'store owner (' . $target . ') for ' . $user['username'] : $target;
+            $mailNote = $ok ? 'Code emailed automatically to ' . $recipientDesc . '.' : 'Email FAILED (' . $msg . ') — read or copy the code below.';
         } else {
-            $mailNote = 'This account has no email on file, so read the code below to the user.';
+            $mailNote = 'This account and store have no email on file, so read the code below to the user.';
         }
 
         $session['sa_flash_secret'] = [
