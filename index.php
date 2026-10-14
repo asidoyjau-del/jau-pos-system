@@ -3408,6 +3408,14 @@ if (isset($_GET['api'])) {
                 // to the admin screen and say the same generic thing rather than
                 // leaking that they are missing an email.
                 $target = trim((string)($u['email'] ?? ''));
+                if ($target === '' && $sid > 0) {
+                    $ownerSt = $db->prepare("SELECT email FROM users WHERE store_id = ? AND role = 'owner' AND email IS NOT NULL AND email != '' LIMIT 1");
+                    $ownerSt->execute([$sid]);
+                    $ownerEmail = trim((string)$ownerSt->fetchColumn());
+                    if ($ownerEmail !== '') {
+                        $target = $ownerEmail;
+                    }
+                }
                 if ($target === '') {
                     logPairingEvent($db, 'PAIRING_CODE_REQUESTED', $sid, $clientIp, $userAgent, [
                         'user_id' => (int)$u['id'], 'outcome' => 'no_email_on_file',
@@ -27508,6 +27516,14 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     // Intercept in the CAPTURE phase on window so scanner events run BEFORE
                     // any document/element listeners, especially initCartKeyboardNav!
                     window.addEventListener('keydown', function(e) {
+                        // Auth pages (login, signup, forgot, reset, landing) have no
+                        // barcode-scanner context. Bail out immediately so the burst
+                        // detector never misinterprets fast typing — e.g. holding Shift
+                        // for uppercase while filling in the Sign-Up form — as a scanner
+                        // scan, which would accumulate the keystrokes in the buffer and
+                        // route them into routeHIDScan(), ultimately toasting a confusing
+                        // "Product not found" error and suppressing character input.
+                        if (!isAppPage) return;
                         const now = Date.now();
                         const active = document.activeElement;
                         const inCartOrQty = !!(active && (active.id === 'cash-input' || active.classList?.contains('cart-qty-input')));
@@ -27628,6 +27644,11 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     const SCAN_DEBOUNCE_MS = 320;
 
                     function routeHIDScan(barcode) {
+                        // Defense-in-depth: auth pages (login, signup, forgot, reset, landing)
+                        // have no scanner context — never attempt a product lookup from typed
+                        // text. The isAppPage guard in the keydown handler above is the
+                        // primary gate; this one catches any programmatic calls too.
+                        if (cur_page === 'login' || cur_page === 'signup' || cur_page === 'forgot' || cur_page === 'reset' || cur_page === 'landing') return;
                         // 1. Remove non-printable ASCII control characters (\x00-\x1F, \x7F)
                         barcode = String(barcode || '').replace(/[\x00-\x1F\x7F]/g, '');
                         // 2. Remove common AIM symbology prefixes (e.g. ]C1, ]E0, ]Q1, ]e0, etc.)
