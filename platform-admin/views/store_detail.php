@@ -208,28 +208,25 @@ $current = (string)($s['client_type'] ?? 'web');
             </td>
             <td>
               <?php if ($live && !$expired): ?>
-                <?php /* The email is only a convenience — the admin is the fallback the
-                       user can actually reach, so a live code can be shown again on
-                       demand instead of forcing a pointless re-issue. */ ?>
                 <form method="POST" action="/platform-admin/users/<?= (int)$t['id'] ?>/pairing/reveal" style="display:inline">
                   <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
                   <button type="submit" class="btn btn-emerald btn-sm" title="Show this code again so you can copy or read it out"><?= $ico('copy') ?> Copy code</button>
                 </form>
-                <button class="btn btn-ghost btn-sm" style="margin-left:6px" data-confirm='<?= json_encode([
-                  "title"   => "Replace this code?",
-                  "desc"    => "A new 6-digit code will be emailed to " . addslashes($t['email'] ?: $t['username']) . " and the current one stops working.",
+                <button class="btn btn-primary btn-sm" style="margin-left:6px" data-confirm='<?= json_encode([
+                  "title"   => "Replace the live code?",
+                  "desc"    => "Replace the live code if the first code expired and is not been use. A new activation code will be generated for " . addslashes($t['full_name'] ?: $t['username']) . " and the current one will stop working.",
                   "action"  => "/platform-admin/users/" . $t['id'] . "/pairing",
                   "btnClass"=> "btn-primary",
-                  "btnLabel"=> "Issue new code",
+                  "btnLabel"=> "Replace code",
                   "redirect"=> "/platform-admin/stores/" . $s['id'],
-                ], JSON_UNESCAPED_UNICODE) ?>'>↻ New code</button>
+                ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('mail') ?> Send code</button>
               <?php else: ?>
                 <button class="btn btn-primary btn-sm" data-confirm='<?= json_encode([
-                  "title"   => "Issue an activation code?",
-                  "desc"    => "A 6-digit code will be emailed to " . addslashes($t['email'] ?: $t['username']) . " for " . addslashes($t['full_name'] ?: $t['username']) . ". You can copy it afterwards if the email doesn't arrive.",
+                  "title"   => "Replace the live code?",
+                  "desc"    => "Replace the live code if the first code expired and is not been use. A new activation code will be generated for " . addslashes($t['full_name'] ?: $t['username']) . " and the current one will stop working.",
                   "action"  => "/platform-admin/users/" . $t['id'] . "/pairing",
                   "btnClass"=> "btn-primary",
-                  "btnLabel"=> "Send code",
+                  "btnLabel"=> "Replace code",
                   "redirect"=> "/platform-admin/stores/" . $s['id'],
                 ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('mail') ?> Send code</button>
               <?php endif; ?>
@@ -258,70 +255,6 @@ $current = (string)($s['client_type'] ?? 'web');
       </table>
     </div>
     <?php endif; ?>
-  </div>
-</div>
-
-<?php /* Legacy whole-install code (migration 003). It still records that this store
-      runs on local hardware, but it no longer unlocks any account — see the
-      redeem endpoint. Kept visible rather than deleted so an admin holding an
-      old code is told plainly what it does and does not do. */ ?>
-<div class="pa-card mb-6">
-  <div class="pa-card-header"><span class="pa-card-title"><?= $ico('key') ?> Store Link Code</span></div>
-  <div class="pa-card-body">
-    <div class="alert alert-info" style="margin-bottom:14px">
-      <strong>This code does not unlock accounts.</strong> It only records that
-      <?= $e($s['name']) ?> runs on a local till &mdash; useful for reporting, and for
-      installs made before per-account codes existed. To let someone actually sign in,
-      issue a code to their own row in the table above.
-    </div>
-
-    <?php if (!empty($pairings)): ?>
-      <?php $codeRow = $pairings[0]; ?>
-      <?php if (!empty($codeRow['can_reveal']) && $liveCodeText !== ''): ?>
-        <?php /* The code is printed HERE, not only in a one-shot banner at the top
-               of the page — otherwise it scrolls out of view the moment the admin
-               is looking at this card, which is exactly where they need it. */ ?>
-        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:16px;border:1px dashed var(--accent);border-radius:var(--radius-sm);background:rgba(47,127,245,.07);margin-bottom:12px">
-          <div>
-            <div class="text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.08em">Your code — give this to the user</div>
-            <div class="pairing-code" id="card-pairing-code"><?= $e($liveCodeText) ?></div>
-          </div>
-          <button type="button" class="btn btn-emerald btn-sm" id="btn-copy-card-code">📋 Copy code</button>
-        </div>
-        <p class="text-muted" style="margin-bottom:12px;font-size:.8rem">
-          Issued <?= $e(substr((string)$codeRow['created_at'], 0, 16)) ?> UTC &middot;
-          expires <?= $e(substr((string)$codeRow['expires_at'], 0, 16)) ?> UTC &middot;
-          unlocks <strong>no account</strong> on its own.
-        </p>
-      <?php else: ?>
-        <?php /* A code IS live, but we cannot read its digits back. Two possible
-               causes — no encryption key on the server, or a key that no longer
-               matches the one the code was sealed with (changed/rotated since).
-               The old wording asserted only the first, which sent the operator
-               to set an env var that was already set. Name both, and make the
-               recovery action explicit: replacing the code re-seals it under the
-               current key and brings it back on screen. */ ?>
-        <div class="alert alert-info" style="margin-bottom:12px">
-          A code is live for this store, issued <?= $e(substr((string)$codeRow['created_at'], 0, 16)) ?> UTC,
-          expiring <?= $e(substr((string)$codeRow['expires_at'], 0, 16)) ?> UTC.
-          <strong>It cannot be re-shown</strong> &mdash; the server either has no encryption key
-          (<code>PLATFORM_ENC_KEY</code>) or the key no longer matches the one this code was
-          sealed with. It still works; you just saw it once.
-          Click <strong>Replace 6-digit code</strong> below to mint one that is shown here.
-        </div>
-      <?php endif; ?>
-    <?php endif; ?>
-
-    <button class="btn btn-primary btn-sm" style="margin-top:<?= !empty($pairings) ? '14px' : '0' ?>" data-confirm='<?= json_encode([
-      "title"   => !empty($pairings) ? "Replace the live code?" : "Generate a whole-store code?",
-      "desc"    => !empty($pairings)
-        ? "A new store link code will be generated for " . addslashes($s['name']) . " and the current one will stop working."
-        : "A single store link code will be generated for " . addslashes($s['name']) . ". It records local usage; it does not unlock any account.",
-      "action"  => "/platform-admin/stores/" . $s['id'] . "/pairing",
-      "btnClass"=> "btn-primary",
-      "btnLabel"=> !empty($pairings) ? "Replace code" : "Generate code",
-      "redirect"=> "/platform-admin/stores/" . $s['id'],
-    ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('key') ?> <?= !empty($pairings) ? 'Replace 6-digit code' : 'Generate 6-digit code' ?></button>
   </div>
 </div>
 

@@ -1578,3 +1578,5 @@ html.theme-light .pa-progress-wrap {
 .pa-progress-bar.violet {
    background: var(--violet)
 }
+
+.mb-6{margin-bottom:24px}
