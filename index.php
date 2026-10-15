@@ -1021,7 +1021,7 @@ function recordStockMovement(PDO $db, int $productId, int $qtyIn, int $qtyOut, ?
 // reset link; the code mail needs a different subject and body but identical
 // transport, and duplicating the curl block would mean two places to fix when
 // the provider changes.
-function sendBrevoMail(string $toEmail, string $toName, string $subject, string $html): array
+function sendBrevoMail(string $toEmail, string $toName, string $subject, string $html, ?array $cc = null): array
 {
     if (BREVO_API_KEY === 'YOUR_BREVO_API_KEY' || !BREVO_API_KEY) {
         return [false, 'Brevo API key not configured on the server.'];
@@ -1035,6 +1035,9 @@ function sendBrevoMail(string $toEmail, string $toName, string $subject, string 
         'subject'     => $subject,
         'htmlContent' => $html,
     ];
+    if (!empty($cc)) {
+        $data['cc'] = $cc;
+    }
     $ch = curl_init('https://api.brevo.com/v3/smtp/email');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
@@ -1882,6 +1885,34 @@ function installDB(): void
     } catch (Exception $e) {
     }
     try {
+        $db->exec("ALTER TABLE users ADD COLUMN account_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE users ADD COLUMN trial_ends_at TIMESTAMP NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE users ADD COLUMN activation_code VARCHAR(64) NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE users ADD COLUMN activation_code_cipher TEXT NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE users ADD COLUMN code_expires_at TIMESTAMP NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE users ADD COLUMN last_pending_email_at TIMESTAMP NULL");
+    } catch (Exception $e) {
+    }
+    try {
+        $db->exec("ALTER TABLE users ADD COLUMN rejection_reason TEXT NULL");
+    } catch (Exception $e) {
+    }
+    try {
         $db->exec("ALTER TABLE categories ADD COLUMN store_id INT NULL");
     } catch (Exception $e) {
     }
@@ -2244,10 +2275,31 @@ function enforceStoreStanding(int $storeId): void
         return;
     }
     $status = (string)($row['status'] ?? 'active');
-    if ($status === 'active' || $status === '') {
-        return;
+    if ($status !== 'active' && $status !== '') {
+        renderAccessRevoked($status, (string)($row['rejection_reason'] ?? ''));
     }
-    renderAccessRevoked($status, (string)($row['rejection_reason'] ?? ''));
+
+    try {
+        $uSt = db()->prepare("SELECT account_status, trial_ends_at, role FROM users WHERE id=? LIMIT 1");
+        $uSt->execute([(int)$_SESSION['uid']]);
+        $uRow = $uSt->fetch();
+        if ($uRow) {
+            $uStatus = (string)($uRow['account_status'] ?? 'ACTIVE');
+            if ($uRow['role'] === 'owner' && $uStatus === 'TRIAL') {
+                if (!empty($uRow['trial_ends_at']) && strtotime((string)$uRow['trial_ends_at']) <= time()) {
+                    db()->prepare("UPDATE users SET account_status = 'LOCKED' WHERE id = ?")->execute([(int)$_SESSION['uid']]);
+                    db()->prepare("UPDATE stores SET status = 'suspended', rejection_reason = ? WHERE id = ?")
+                       ->execute(['Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.', $storeId]);
+                    $uStatus = 'LOCKED';
+                }
+            }
+            if ($uStatus === 'LOCKED' || $uStatus === 'REJECTED' || $uStatus === 'PENDING') {
+                renderAccessRevoked($uStatus === 'LOCKED' ? 'suspended' : 'rejected',
+                    $uStatus === 'LOCKED' ? 'Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.' : 'Your account access has been restricted.');
+            }
+        }
+    } catch (\Throwable $e) {
+    }
 }
 
 /** Clears the session + remember cookie, then renders the blocked screen and stops. */
@@ -3739,6 +3791,70 @@ if (isset($_GET['api'])) {
                 ]);
             }
 
+            if ($action === 'verify_account_code') {
+                $username = trim((string)($body['username'] ?? ($_POST['username'] ?? '')));
+                $code     = preg_replace('/\D/', '', (string)($body['access_code'] ?? ($body['code'] ?? ($_POST['access_code'] ?? ($_POST['code'] ?? '')))));
+
+                if ($username === '' || strlen($code) !== 6) {
+                    json(false, null, 'Please enter your username and a valid 6-digit access code.');
+                }
+
+                $codeHash = hash('sha256', $code);
+                $st = $db->prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1');
+                $st->execute([$username]);
+                $user = $st->fetch();
+
+                if (!$user) {
+                    json(false, null, 'Invalid username or access code.');
+                }
+
+                $storedHash = (string)($user['activation_code'] ?? '');
+                $expiresAt = !empty($user['code_expires_at']) ? strtotime((string)$user['code_expires_at']) : 0;
+
+                if ($storedHash === '' || !hash_equals($storedHash, $codeHash)) {
+                    json(false, null, 'Invalid 6-digit access code. Please check and try again.');
+                }
+
+                if ($expiresAt > 0 && $expiresAt < time()) {
+                    json(false, null, 'This 6-digit access code has expired. Please contact the Super Admin for a new code.');
+                }
+
+                $uid = (int)$user['id'];
+                $sid = (int)($user['store_id'] ?: 1);
+
+                $db->prepare(
+                    "UPDATE users
+                        SET account_status = 'ACTIVE',
+                            activation_code = NULL,
+                            activation_code_cipher = NULL,
+                            code_expires_at = NULL
+                      WHERE id = ?"
+                )->execute([$uid]);
+
+                if ($user['role'] === 'owner') {
+                    $db->prepare("UPDATE stores SET status = 'active', rejection_reason = NULL WHERE id = ?")->execute([$sid]);
+                }
+
+                if (session_status() !== PHP_SESSION_ACTIVE) {
+                    @session_start();
+                }
+                $_SESSION = [];
+                session_regenerate_id(true);
+                $_SESSION['uid'] = $uid;
+                $_SESSION['username'] = $user['username'];
+                $_SESSION['full_name'] = $user['full_name'];
+                $_SESSION['role'] = $user['role'];
+                $_SESSION['email'] = $user['email'];
+                $_SESSION['store_id'] = $sid;
+                createAuthToken($uid);
+                $db->prepare("UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?")->execute([$uid]);
+
+                json(true, [
+                    'message'  => 'Account successfully activated! Welcome to ProCast.',
+                    'redirect' => '?page=dashboard'
+                ]);
+            }
+
             if ($action === 'cloud_auth_login') {
                 $username = trim($body['username'] ?? ($_POST['username'] ?? ''));
                 $password = (string)($body['password'] ?? ($_POST['password'] ?? ''));
@@ -3746,12 +3862,57 @@ if (isset($_GET['api'])) {
                     json(false, null, 'Username and password are required.');
                 }
 
-                $uStmt = $db->prepare("SELECT id, username, password, full_name, role, email, store_id FROM users WHERE username = ? LIMIT 1");
+                $uStmt = $db->prepare("SELECT * FROM users WHERE username = ? LIMIT 1");
                 $uStmt->execute([$username]);
                 $u = $uStmt->fetch();
 
                 if ($u && password_verify($password, $u['password'])) {
                     $sid = (int)($u['store_id'] ?: 1);
+                    $accStatus = (string)($u['account_status'] ?? 'ACTIVE');
+                    $trialEndsAt = !empty($u['trial_ends_at']) ? strtotime((string)$u['trial_ends_at']) : null;
+
+                    // Owner 7-day trial check
+                    if ($u['role'] === 'owner' && $accStatus === 'TRIAL') {
+                        if ($trialEndsAt !== null && $trialEndsAt <= time()) {
+                            $db->prepare("UPDATE users SET account_status = 'LOCKED' WHERE id = ?")->execute([(int)$u['id']]);
+                            $db->prepare("UPDATE stores SET status = 'suspended', rejection_reason = ? WHERE id = ?")
+                               ->execute(['Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.', $sid]);
+                            $accStatus = 'LOCKED';
+                        }
+                    }
+
+                    if ($accStatus === 'LOCKED') {
+                        json(false, ['locked' => true, 'lock_type' => 'trial_expired'], 'Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.');
+                    }
+
+                    if ($accStatus === 'PENDING') {
+                        // Rate limited email notification (once per 24 hours)
+                        $lastNotice = !empty($u['last_pending_email_at']) ? strtotime((string)$u['last_pending_email_at']) : 0;
+                        if ($lastNotice < (time() - 86400)) {
+                            $targetEmail = trim((string)($u['email'] ?? ''));
+                            if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+                                sendBrevoMail(
+                                    $targetEmail,
+                                    (string)($u['full_name'] ?: $u['username']),
+                                    'ProCast Staff Account Review',
+                                    '<p>Hello ' . htmlspecialchars((string)($u['full_name'] ?: $u['username'])) . ',</p>'
+                                    . '<p>Your staff account is currently undergoing Super Admin review. Approval typically takes up to 24 hours.</p>'
+                                );
+                                $db->prepare("UPDATE users SET last_pending_email_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([(int)$u['id']]);
+                            }
+                        }
+                        json(false, ['pending' => true], 'Account pending approval.');
+                    }
+
+                    if ($accStatus === 'REJECTED') {
+                        json(false, ['rejected' => true], 'Your staff account application was not approved. ' . (string)($u['rejection_reason'] ?? ''));
+                    }
+
+                    if (!empty($u['activation_code'])) {
+                        // Staff member requires first-time login passcode verification
+                        json(false, ['require_passcode' => true], 'Please enter your assigned 6-digit access code to activate your account.');
+                    }
+
                     $storeName = 'Store #' . $sid;
                     $storeCurrency = '₱';
                     $storeStatus = 'active';
@@ -6649,9 +6810,11 @@ $txList = $body['transactions'] ?? [];
                 if (!$u || !$p) json(false, null, 'Username and password required');
                 try {
                     // New staff/co-owner accounts join the CREATING owner's store —
-                    // they're teammates on the same store, not a brand-new one (that's
-                    // what Sign Up is for).
-                    $db->prepare("INSERT INTO users (username,password,full_name,role,email,store_id) VALUES (?,?,?,?,?,?)")->execute([$u, password_hash($p, PASSWORD_DEFAULT), $n, $r2, $em, currentStoreId()]);
+                    // Staff accounts start with account_status = 'PENDING' awaiting Super Admin review.
+                    // Co-owners join with 'ACTIVE'.
+                    $initialStatus = ($r2 === 'staff') ? 'PENDING' : 'ACTIVE';
+                    $db->prepare("INSERT INTO users (username,password,full_name,role,email,store_id,account_status) VALUES (?,?,?,?,?,?,?)")
+                       ->execute([$u, password_hash($p, PASSWORD_DEFAULT), $n, $r2, $em, currentStoreId(), $initialStatus]);
                     json(true, ['id' => lastInsertedId($db)]);
                 } catch (PDOException $e) {
                     json(false, null, 'Username taken');
@@ -7841,87 +8004,197 @@ function renderShopNameHtml(string $name, string $tag = 'span'): string
 }
 
 // LOGIN POST
+$lockScreen = false;
+$lockedUsername = '';
+$requirePasscode = false;
+$passcodeUsername = '';
+
 if ($page === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = trim($_POST['username'] ?? '');
-    $password = $_POST['password'] ?? '';
-    if (!csrfValid($_POST['csrf_token'] ?? null)) {
-        $loginError = 'Your session expired — please try again.';
-    } elseif ($username && $password) {
-        $loginAttempts = 0;
-        $loginSuccess = false;
-        while ($loginAttempts < 2 && !$loginSuccess) {
-            $loginAttempts++;
-            try {
-                $db = db($loginAttempts > 1);
-                $lockedMin = loginLockoutMinutesLeft($db, $username);
-                if ($lockedMin > 0) {
-                    $loginError = "Too many failed attempts. Try again in $lockedMin minute" . ($lockedMin === 1 ? '' : 's') . '.';
-                    break;
-                } else {
-                    $stmt = $db->prepare("SELECT id,username,password,full_name,role,email,store_id FROM users WHERE username=? LIMIT 1");
-                    $stmt->execute([$username]);
-                    $user = $stmt->fetch();
-                    if ($user && password_verify($password, $user['password'])) {
-                        // A suspended store must never be able to open a NEW
-                        // session. The password is correct, so without this the
-                        // only thing that would stop a cashier returning to the
-                        // till is the enforcement inside requireLogin() on the
-                        // NEXT page -- which still let them land on the login
-                        // redirect instead of being told why.
-                        $storeSt = $db->prepare("SELECT status, rejection_reason FROM stores WHERE id=? LIMIT 1");
-                        $storeSt->execute([(int)($user['store_id'] ?: 1)]);
-                        $storeRow = $storeSt->fetch();
-                        if ($storeRow && (string)($storeRow['status'] ?? 'active') !== 'active') {
-                            recordLoginAttempt($db, $username, false);
-                            renderAccessRevoked(
-                                (string)$storeRow['status'],
-                                (string)($storeRow['rejection_reason'] ?? '')
-                            );
-                        }
-                        recordLoginAttempt($db, $username, true);
-                        // Clear previous session memory and regenerate ID on login
-                        $_SESSION = [];
-                        session_regenerate_id(true);
-                        $_SESSION['uid'] = $user['id'];
-                        $_SESSION['username'] = $user['username'];
-                        $_SESSION['full_name'] = $user['full_name'];
-                        $_SESSION['role'] = $user['role'];
-                        $_SESSION['email'] = $user['email'];
-                        // This is the whole multi-tenant boundary — every query
-                        // for the rest of this session filters by this. Falls
-                        // back to Store #1 only if a pre-migration user row
-                        // somehow still has no store_id.
-                        $_SESSION['store_id'] = (int)($user['store_id'] ?: 1);
-                        // Issue the 30-day remember token so a server restart, a
-                        // closed browser, or a powered-off device never costs the
-                        // login — only an explicit Logout does.
-                        createAuthToken((int)$user['id']);
-                        $db->prepare("UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?")->execute([$user['id']]);
-                        $loginSuccess = true;
-                        header('Location: ?page=dashboard');
-                        exit;
-                    } else {
-                        recordLoginAttempt($db, $username, false);
-                        $loginError = 'Invalid username or password.';
-                        break;
-                    }
+    if (($_POST['action'] ?? '') === 'verify_account_code') {
+        $username = trim($_POST['username'] ?? '');
+        $code     = preg_replace('/\D/', '', (string)($_POST['access_code'] ?? ''));
+        if (!csrfValid($_POST['csrf_token'] ?? null)) {
+            $loginError = 'Your session expired — please try again.';
+        } elseif ($username === '' || strlen($code) !== 6) {
+            $loginError = 'Please enter a valid 6-digit access code.';
+            $lockScreen = true;
+            $lockedUsername = $username;
+        } else {
+            $db = db();
+            $st = $db->prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1');
+            $st->execute([$username]);
+            $u = $st->fetch();
+            $codeHash = hash('sha256', $code);
+            $storedHash = (string)($u['activation_code'] ?? '');
+            $expiresAt = !empty($u['code_expires_at']) ? strtotime((string)$u['code_expires_at']) : 0;
+
+            if (!$u || $storedHash === '' || !hash_equals($storedHash, $codeHash)) {
+                $loginError = 'Invalid 6-digit access code. Please check and try again.';
+                $lockScreen = true;
+                $lockedUsername = $username;
+            } elseif ($expiresAt > 0 && $expiresAt < time()) {
+                $loginError = 'This 6-digit access code has expired. Please contact the Super Admin for a new code.';
+                $lockScreen = true;
+                $lockedUsername = $username;
+            } else {
+                $uid = (int)$u['id'];
+                $sid = (int)($u['store_id'] ?: 1);
+
+                $db->prepare(
+                    "UPDATE users
+                        SET account_status = 'ACTIVE',
+                            activation_code = NULL,
+                            activation_code_cipher = NULL,
+                            code_expires_at = NULL
+                      WHERE id = ?"
+                )->execute([$uid]);
+
+                if ($u['role'] === 'owner') {
+                    $db->prepare("UPDATE stores SET status = 'active', rejection_reason = NULL WHERE id = ?")->execute([$sid]);
                 }
-            } catch (\Throwable $e) {
-                error_log('Login error (attempt ' . $loginAttempts . '): ' . $e->getMessage());
-                if ($loginAttempts < 2) {
-                    usleep(300000); // 300ms pause before retrying fresh connection
-                    continue;
-                }
-                $msg = $e->getMessage();
-                if (stripos($msg, 'connection') !== false || stripos($msg, 'server closed') !== false || stripos($msg, 'timeout') !== false || stripos($msg, 'remaining connection slots') !== false) {
-                    $loginError = 'Database is reconnecting or waking up. Please wait 10 seconds and try again.';
-                } else {
-                    $loginError = 'Something went wrong. Please try again.';
-                }
+
+                $_SESSION = [];
+                session_regenerate_id(true);
+                $_SESSION['uid'] = $uid;
+                $_SESSION['username'] = $u['username'];
+                $_SESSION['full_name'] = $u['full_name'];
+                $_SESSION['role'] = $u['role'];
+                $_SESSION['email'] = $u['email'];
+                $_SESSION['store_id'] = $sid;
+                createAuthToken($uid);
+                $db->prepare("UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?")->execute([$uid]);
+                header('Location: ?page=dashboard');
+                exit;
             }
         }
     } else {
-        $loginError = 'Please enter username and password.';
+        $username = trim($_POST['username'] ?? '');
+        $password = $_POST['password'] ?? '';
+        if (!csrfValid($_POST['csrf_token'] ?? null)) {
+            $loginError = 'Your session expired — please try again.';
+        } elseif ($username && $password) {
+            $loginAttempts = 0;
+            $loginSuccess = false;
+            while ($loginAttempts < 2 && !$loginSuccess) {
+                $loginAttempts++;
+                try {
+                    $db = db($loginAttempts > 1);
+                    $lockedMin = loginLockoutMinutesLeft($db, $username);
+                    if ($lockedMin > 0) {
+                        $loginError = "Too many failed attempts. Try again in $lockedMin minute" . ($lockedMin === 1 ? '' : 's') . '.';
+                        break;
+                    } else {
+                        $stmt = $db->prepare("SELECT * FROM users WHERE username=? LIMIT 1");
+                        $stmt->execute([$username]);
+                        $user = $stmt->fetch();
+                        if ($user && password_verify($password, $user['password'])) {
+                            $sid = (int)($user['store_id'] ?: 1);
+                            $accStatus = (string)($user['account_status'] ?? 'ACTIVE');
+                            $trialEndsAt = !empty($user['trial_ends_at']) ? strtotime((string)$user['trial_ends_at']) : null;
+
+                            // Owner 7-day trial check
+                            if ($user['role'] === 'owner' && $accStatus === 'TRIAL') {
+                                if ($trialEndsAt !== null && $trialEndsAt <= time()) {
+                                    $db->prepare("UPDATE users SET account_status = 'LOCKED' WHERE id = ?")->execute([(int)$user['id']]);
+                                    $db->prepare("UPDATE stores SET status = 'suspended', rejection_reason = ? WHERE id = ?")
+                                       ->execute(['Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.', $sid]);
+                                    $accStatus = 'LOCKED';
+                                }
+                            }
+
+                            if ($accStatus === 'LOCKED') {
+                                recordLoginAttempt($db, $username, false);
+                                $lockScreen = true;
+                                $lockedUsername = $user['username'];
+                                $loginError = 'Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.';
+                                break;
+                            }
+
+                            if ($accStatus === 'PENDING') {
+                                recordLoginAttempt($db, $username, false);
+                                // 24-hour rate limit on email notifications
+                                $lastNotice = !empty($user['last_pending_email_at']) ? strtotime((string)$user['last_pending_email_at']) : 0;
+                                if ($lastNotice < (time() - 86400)) {
+                                    $targetEmail = trim((string)($user['email'] ?? ''));
+                                    if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+                                        sendBrevoMail(
+                                            $targetEmail,
+                                            (string)($user['full_name'] ?: $user['username']),
+                                            'ProCast Staff Account Review',
+                                            '<p>Hello ' . htmlspecialchars((string)($user['full_name'] ?: $user['username'])) . ',</p>'
+                                            . '<p>Your staff account is currently undergoing Super Admin review. Approval typically takes up to 24 hours.</p>'
+                                        );
+                                        $db->prepare("UPDATE users SET last_pending_email_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([(int)$user['id']]);
+                                    }
+                                }
+                                $loginError = 'Account pending approval.';
+                                break;
+                            }
+
+                            if ($accStatus === 'REJECTED') {
+                                recordLoginAttempt($db, $username, false);
+                                $loginError = 'Your staff account application was not approved. ' . (string)($user['rejection_reason'] ?? '');
+                                break;
+                            }
+
+                            if (!empty($user['activation_code'])) {
+                                recordLoginAttempt($db, $username, false);
+                                $requirePasscode = true;
+                                $passcodeUsername = $user['username'];
+                                $loginError = 'Please enter your assigned 6-digit access code to activate your account.';
+                                break;
+                            }
+
+                            // A suspended store must never be able to open a NEW session
+                            $storeSt = $db->prepare("SELECT status, rejection_reason FROM stores WHERE id=? LIMIT 1");
+                            $storeSt->execute([$sid]);
+                            $storeRow = $storeSt->fetch();
+                            if ($storeRow && (string)($storeRow['status'] ?? 'active') !== 'active') {
+                                recordLoginAttempt($db, $username, false);
+                                renderAccessRevoked(
+                                    (string)$storeRow['status'],
+                                    (string)($storeRow['rejection_reason'] ?? '')
+                                );
+                            }
+                            recordLoginAttempt($db, $username, true);
+                            // Clear previous session memory and regenerate ID on login
+                            $_SESSION = [];
+                            session_regenerate_id(true);
+                            $_SESSION['uid'] = $user['id'];
+                            $_SESSION['username'] = $user['username'];
+                            $_SESSION['full_name'] = $user['full_name'];
+                            $_SESSION['role'] = $user['role'];
+                            $_SESSION['email'] = $user['email'];
+                            $_SESSION['store_id'] = $sid;
+                            createAuthToken((int)$user['id']);
+                            $db->prepare("UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?")->execute([$user['id']]);
+                            $loginSuccess = true;
+                            header('Location: ?page=dashboard');
+                            exit;
+                        } else {
+                            recordLoginAttempt($db, $username, false);
+                            $loginError = 'Invalid username or password.';
+                            break;
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    error_log('Login error (attempt ' . $loginAttempts . '): ' . $e->getMessage());
+                    if ($loginAttempts < 2) {
+                        usleep(300000);
+                        continue;
+                    }
+                    $msg = $e->getMessage();
+                    if (stripos($msg, 'connection') !== false || stripos($msg, 'server closed') !== false || stripos($msg, 'timeout') !== false || stripos($msg, 'remaining connection slots') !== false) {
+                        $loginError = 'Database is reconnecting or waking up. Please wait 10 seconds and try again.';
+                    } else {
+                        $loginError = 'Something went wrong. Please try again.';
+                    }
+                    break;
+                }
+            }
+        } else {
+            $loginError = 'Please enter username and password.';
+        }
     }
 }
 
@@ -8066,13 +8339,12 @@ if ($page === 'signup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 $db = db();
                 $db->beginTransaction();
                 // A brand-new, empty store for this owner — separate from
-                // every other store in the system. Name defaults to "ProCast"
-                // until they rename it in Settings, same as the
-                // table-level default.
-                $db->exec("INSERT INTO stores (name) VALUES ('ProCast')");
+                // every other store in the system. Immediate access under TRIAL for 7 days.
+                $trialEndsAt = date('Y-m-d H:i:s', time() + 7 * 86400);
+                $db->exec("INSERT INTO stores (name, status) VALUES ('ProCast', 'active')");
                 $newStoreId = (int)lastInsertedId($db);
-                $db->prepare("INSERT INTO users (username,password,full_name,email,role,store_id) VALUES (?,?,?,?,'owner',?)")
-                    ->execute([$username, password_hash($pw, PASSWORD_DEFAULT), $fullName, $email, $newStoreId]);
+                $db->prepare("INSERT INTO users (username,password,full_name,email,role,store_id,account_status,trial_ends_at) VALUES (?,?,?,?,'owner',?,'TRIAL',?)")
+                    ->execute([$username, password_hash($pw, PASSWORD_DEFAULT), $fullName, $email, $newStoreId, $trialEndsAt]);
                 // Seed this store with its own starter settings + default
                 // categories, same as what a fresh install gets — a new
                 // store shouldn't start with literally nothing to pick from.
@@ -14774,44 +15046,83 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     <a href="?page=landing" style="display:inline-block;margin-top:8px;font-size:.8rem;color:var(--text3);text-decoration:none;border-bottom:1px dashed var(--text3);">New here? See how it works →</a>
                 </div>
                 <div class="login-card">
-                    <h2 style="font-size:1.05rem;font-weight:600;margin-bottom:18px;">Welcome back</h2>
-                    <?php if ($signupFlash): ?>
-                        <div class="error-box" style="background:rgba(45,122,58,.08);border-color:rgba(45,122,58,.25);color:var(--green);">Congratulations! Your account was created successfully. You can now log in.</div>
-                    <?php endif; ?>
-                    <?php if ($loginError): ?>
-                        <div class="error-box"><?= htmlspecialchars($loginError) ?></div>
-                    <?php endif; ?>
-                    <form method="POST" action="?page=login">
-                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(CSRF_TOKEN) ?>" />
-                        <div class="form-group">
-                            <label class="form-label">Username</label>
-                            <div class="input-wrap">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
-                                    <circle cx="12" cy="7" r="4" />
-                                </svg>
-                                <input type="text" name="username" class="form-input" placeholder="Enter username" value="<?= htmlspecialchars($_POST['username'] ?? '') ?>" autocomplete="username" autofocus required />
+                    <?php if ($lockScreen || $requirePasscode || isset($_GET['enter_code'])): ?>
+                        <div style="background:rgba(225,29,72,.07);border:1px solid rgba(225,29,72,.22);border-radius:10px;padding:16px;margin-bottom:18px;">
+                            <div style="display:flex;align-items:center;gap:8px;color:var(--rose,#e11d48);font-weight:700;margin-bottom:6px;font-size:1.05rem;">
+                                <svg style="width:20px;height:20px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                                <?= $lockScreen ? 'Account Locked' : 'Passcode Verification' ?>
                             </div>
+                            <p style="font-size:0.875rem;line-height:1.5;color:var(--text, #333);margin:0 0 14px;">
+                                <?= $lockScreen
+                                    ? 'Your 7-day trial has ended. Please enter the 6-digit access code provided by the Super Admin to activate your account.'
+                                    : 'Please enter the 6-digit access code provided by the Super Admin to activate your account.' ?>
+                            </p>
+                            <?php if ($loginError && !$lockScreen): ?>
+                                <div class="error-box" style="margin-bottom:12px;"><?= htmlspecialchars($loginError) ?></div>
+                            <?php endif; ?>
+                            <form method="POST" action="?page=login" id="passcode-verification-form">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(CSRF_TOKEN) ?>" />
+                                <input type="hidden" name="action" value="verify_account_code" />
+                                <div class="form-group">
+                                    <label class="form-label" style="font-weight:600;">Username</label>
+                                    <input type="text" name="username" class="form-input" placeholder="Enter username"
+                                           value="<?= htmlspecialchars($lockedUsername ?: ($passcodeUsername ?: ($_POST['username'] ?? ''))) ?>" required />
+                                </div>
+                                <div class="form-group" style="margin-top:10px;">
+                                    <label class="form-label" style="font-weight:600;">6-Digit Access Code</label>
+                                    <input type="text" name="access_code" maxlength="6" pattern="[0-9]{6}" class="form-input font-mono"
+                                           placeholder="••••••" autofocus required autocomplete="one-time-code"
+                                           style="font-size:1.5rem;letter-spacing:0.35em;text-align:center;font-weight:700;padding:10px;" />
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-full btn-lg" style="margin-top:12px;box-shadow:0 6px 18px rgba(47,127,245,.45);">
+                                    Activate Account →
+                                </button>
+                                <div style="text-align:center;margin-top:14px;">
+                                    <a href="?page=login" style="font-size:0.82rem;color:var(--text3);text-decoration:none;">← Return to regular sign in</a>
+                                </div>
+                            </form>
                         </div>
-                        <div class="form-group">
-                            <label class="form-label">Password</label>
-                            <div class="input-wrap">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <rect x="3" y="11" width="18" height="11" rx="2" />
-                                    <path d="M7 11V7a5 5 0 0110 0v4" />
-                                </svg>
-                                <input type="password" name="password" id="pw-input" class="form-input pw-has-eye" placeholder="Enter password" autocomplete="current-password" required />
-                                <button type="button" class="show-pass-btn" onclick="togglePass(this)" aria-label="Show password">👁️</button>
+                    <?php else: ?>
+                        <h2 style="font-size:1.05rem;font-weight:600;margin-bottom:18px;">Welcome back</h2>
+                        <?php if ($signupFlash): ?>
+                            <div class="error-box" style="background:rgba(45,122,58,.08);border-color:rgba(45,122,58,.25);color:var(--green);">Congratulations! Your account was created successfully. You can now log in.</div>
+                        <?php endif; ?>
+                        <?php if ($loginError): ?>
+                            <div class="error-box"><?= htmlspecialchars($loginError) ?></div>
+                        <?php endif; ?>
+                        <form method="POST" action="?page=login">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(CSRF_TOKEN) ?>" />
+                            <div class="form-group">
+                                <label class="form-label">Username</label>
+                                <div class="input-wrap">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+                                        <circle cx="12" cy="7" r="4" />
+                                    </svg>
+                                    <input type="text" name="username" class="form-input" placeholder="Enter username" value="<?= htmlspecialchars($_POST['username'] ?? '') ?>" autocomplete="username" autofocus required />
+                                </div>
                             </div>
+                            <div class="form-group">
+                                <label class="form-label">Password</label>
+                                <div class="input-wrap">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="3" y="11" width="18" height="11" rx="2" />
+                                        <path d="M7 11V7a5 5 0 0110 0v4" />
+                                    </svg>
+                                    <input type="password" name="password" id="pw-input" class="form-input pw-has-eye" placeholder="Enter password" autocomplete="current-password" required />
+                                    <button type="button" class="show-pass-btn" onclick="togglePass(this)" aria-label="Show password">👁️</button>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:10px;margin-top:6px;">
+                                <a href="?page=signup" class="btn btn-secondary btn-full" style="text-decoration:none;text-align:center;display:flex;align-items:center;justify-content:center;">Sign up</a>
+                                <button type="submit" class="btn btn-primary btn-full btn-lg" style="box-shadow:0 6px 18px rgba(47,127,245,.45);">Login →</button>
+                            </div>
+                        </form>
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;font-size:.85rem;">
+                            <a href="?page=forgot" style="color:#0d6efd;text-decoration:none;font-weight:700;">Forgot password?</a>
+                            <a href="?page=login&enter_code=1" style="color:var(--text3);text-decoration:none;">Have an activation code? →</a>
                         </div>
-                        <div style="display:flex;gap:10px;margin-top:6px;">
-                            <a href="?page=signup" class="btn btn-secondary btn-full" style="text-decoration:none;text-align:center;display:flex;align-items:center;justify-content:center;">Sign up</a>
-                            <button type="submit" class="btn btn-primary btn-full btn-lg" style="box-shadow:0 6px 18px rgba(47,127,245,.45);">Login →</button>
-                        </div>
-                    </form>
-                    <div style="text-align:left;margin-top:18px;">
-                        <a href="?page=forgot" style="font-size:.85rem;color:#0d6efd;text-decoration:none;font-weight:700;">Forgot password?</a>
-                    </div>
+                    <?php endif; ?>
                 </div>
             </div>
         </main>
