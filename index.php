@@ -1112,7 +1112,14 @@ function sealPairingCode(string $plain): ?string
 {
     $key = null;
     foreach (['PLATFORM_ENC_KEY', 'PLATFORM_CRYPTO_KEY'] as $var) {
-        $encoded = trim((string)getenv($var));
+        $rawEnv = getenv($var);
+        $encoded = trim((string)($rawEnv !== false && $rawEnv !== '' ? $rawEnv : ''));
+        if ($encoded === '' && class_exists(\ProCast\Support\Env::class)) {
+            $encoded = trim((string)\ProCast\Support\Env::get($var, ''));
+        }
+        if ($encoded === '') {
+            $encoded = trim((string)($_ENV[$var] ?? ($_SERVER[$var] ?? '')));
+        }
         if ($encoded === '') {
             continue;
         }
@@ -3613,7 +3620,7 @@ if (isset($_GET['api'])) {
 
                 $st = $db->prepare(
                     'UPDATE platform_user_pairings
-                        SET used_at = ?, used_ip = ?, code_cipher = NULL
+                        SET used_at = ?, used_ip = ? /* code_cipher = NULL */
                       WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
                         AND (? = \'\' OR user_id = (SELECT id FROM users WHERE LOWER(username) = ?))
                         AND (role IS NULL OR role = (SELECT role FROM users WHERE id = platform_user_pairings.user_id)
