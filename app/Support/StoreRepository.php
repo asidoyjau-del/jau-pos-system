@@ -534,8 +534,8 @@ final class StoreRepository
                LEFT JOIN LATERAL (
                    SELECT id, created_at, expires_at, used_at, role, code_cipher
                      FROM platform_user_pairings
-                    WHERE user_id = u.id AND used_at IS NULL
-                    ORDER BY created_at DESC LIMIT 1
+                    WHERE user_id = u.id
+                    ORDER BY (used_at IS NULL) DESC, created_at DESC LIMIT 1
                ) p ON TRUE
               WHERE u.store_id = ?
               ORDER BY (u.role = 'owner') DESC, u.id ASC"
