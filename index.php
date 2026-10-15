@@ -3426,7 +3426,7 @@ if (isset($_GET['api'])) {
                 // A code is a login credential, so it must never be minted for an
                 // account that has no business signing in at a till at all.
                 $role = (string)($u['role'] ?? '');
-                if (!in_array($role, ['owner', 'admin', 'cashier'], true)) {
+                if (!in_array($role, ['owner', 'admin', 'cashier', 'staff'], true)) {
                     logPairingEvent($db, 'PAIRING_CODE_REQUESTED', $sid, $clientIp, $userAgent, [
                         'user_id' => (int)$u['id'], 'outcome' => 'role_not_permitted', 'role' => $role,
                     ]);
@@ -3616,7 +3616,8 @@ if (isset($_GET['api'])) {
                         SET used_at = ?, used_ip = ?, code_cipher = NULL
                       WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
                         AND (? = \'\' OR user_id = (SELECT id FROM users WHERE LOWER(username) = ?))
-                        AND (role IS NULL OR role = (SELECT role FROM users WHERE id = platform_user_pairings.user_id))
+                        AND (role IS NULL OR role = (SELECT role FROM users WHERE id = platform_user_pairings.user_id)
+                             OR (role IN (\'cashier\', \'staff\') AND (SELECT role FROM users WHERE id = platform_user_pairings.user_id) IN (\'cashier\', \'staff\')))
                    RETURNING user_id'
                 );
                 $st->execute([$nowUtc, $clientIp, $codeHash, $nowUtc, $claimedUser, $claimedUser]);
@@ -3629,7 +3630,7 @@ if (isset($_GET['api'])) {
                     $chk = $db->prepare(
                         'SELECT 1 FROM platform_user_pairings
                           WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
-                            AND user_id <> (SELECT id FROM users WHERE LOWER(username) = ?)'
+                            AND user_id NOT IN (SELECT id FROM users WHERE LOWER(username) = ?)'
                     );
                     $chk->execute([$codeHash, $nowUtc, $claimedUser]);
                     if ($chk->fetchColumn() !== false) {
