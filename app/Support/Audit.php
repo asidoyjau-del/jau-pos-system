@@ -34,6 +34,10 @@ final class Audit
     public const EMAIL_FAILED     = 'NOTIFICATION_EMAIL_FAILED';
     public const DOCUMENT_VIEWED  = 'DOCUMENT_VIEWED';
     public const USER_SEARCH      = 'USER_SEARCH';
+    public const STAFF_APPROVED   = 'STAFF_APPROVED';
+    public const STAFF_REJECTED   = 'STAFF_REJECTED';
+    public const CODE_REGENERATED = 'CODE_REGENERATED';
+    public const OWNER_UNLOCKED   = 'OWNER_UNLOCKED';
 
     /** @param array<string,mixed> $details */
     public static function log(

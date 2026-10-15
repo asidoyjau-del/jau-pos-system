@@ -874,6 +874,234 @@ final class SuperAdminDashboardController
         return Response::redirect('/stores/' . $storeId);
     }
 
+    // ── Approvals Queue ──────────────────────────────────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function approvals(Request $req, array &$session, array $admin, int $now): Response
+    {
+        $q = mb_substr($req->queryStr('q'), 0, 100);
+        $pendingStores = $this->stores->list('pending_approval', $q, 100);
+        $pendingStaff = $this->stores->pendingStaffAccounts($q, 100);
+
+        return $this->page('approvals', $session, $admin, 'Pending Approvals', 'approvals', [
+            'pendingStores' => $pendingStores,
+            'pendingStaff'  => $pendingStaff,
+            'q'             => $q,
+            'now'           => $now,
+        ]);
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function approveStaff(Request $req, array &$session, array $admin, int $userId, int $now): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $store = $storeId > 0 ? $this->stores->find($storeId) : null;
+
+        $code = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+        $codeHash = hash('sha256', $code);
+        $ttl = 7 * 86400; // 7 days
+        $expiresUtc = gmdate('Y-m-d H:i:s', $now + $ttl);
+
+        if (!$this->stores->approveStaffAccount($userId, $codeHash, $expiresUtc, $this->sealCode($code))) {
+            $session['sa_flash'] = ['type' => 'error', 'msg' => 'Could not approve staff account — it may already be approved.'];
+            return Response::redirect('/approvals');
+        }
+
+        Audit::log($this->db, (int)$admin['id'], Audit::STAFF_APPROVED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $user['username'],
+        ]);
+
+        // Email to staff member and CC store owner
+        $targetEmail = trim((string)($user['email'] ?? ''));
+        $targetName = (string)($user['full_name'] ?: $user['username']);
+        $ownerEmail = trim((string)($store['owner_email'] ?? ''));
+        $ownerName = (string)($store['owner_name'] ?? 'Store Owner');
+
+        $cc = [];
+        if ($ownerEmail !== '' && filter_var($ownerEmail, FILTER_VALIDATE_EMAIL) && strtolower($ownerEmail) !== strtolower($targetEmail)) {
+            $cc[] = ['email' => $ownerEmail, 'name' => $ownerName];
+        }
+
+        $mailNote = '';
+        if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+            $subject = 'Your ProCast Staff Account Has Been Approved';
+            $html = sprintf(
+                '<p>Hello %s,</p>'
+                . '<p>Your staff account (<strong>%s</strong>) for <strong>%s</strong> has been approved by the Super Admin.</p>'
+                . '<p>Your 6-digit access code for first-time login verification is:</p>'
+                . '<p style="font-size:32px;font-weight:800;letter-spacing:.3em;color:#2f7ff5;margin:20px 0;">%s</p>'
+                . '<p>Please enter this code upon logging into ProCast to activate your session. This code is valid for 7 days.</p>',
+                View::e($targetName),
+                View::e($user['username']),
+                View::e($store['name'] ?? 'ProCast Store'),
+                View::e($code)
+            );
+            [$ok, $msg] = Mailer::send($targetEmail, $targetName, $subject, $html, $cc);
+            $mailNote = $ok ? ' Notification email with 6-digit code sent to staff member' . (!empty($cc) ? ' (and CC\'ed owner).' : '.') : ' (Email delivery failed: ' . $msg . ')';
+        } else {
+            $mailNote = ' (No email on file for staff member — copy code below to provide manually).';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'Assigned 6-digit access code for staff: ' . (string)$user['username'],
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        $session['sa_flash'] = ['type' => 'success', 'msg' => 'Staff account "' . (string)$user['username'] . '" approved.' . $mailNote];
+        return Response::redirect('/approvals');
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function rejectStaff(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $reason = trim((string)$req->input('reason'));
+        if ($reason === '') {
+            $reason = 'Application did not meet requirements.';
+        }
+
+        if (!$this->stores->rejectStaffAccount($userId, $reason)) {
+            $session['sa_flash'] = ['type' => 'error', 'msg' => 'Could not reject staff account.'];
+            return Response::redirect('/approvals');
+        }
+
+        Audit::log($this->db, (int)$admin['id'], Audit::STAFF_REJECTED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'reason'  => $reason,
+        ]);
+
+        $targetEmail = trim((string)($user['email'] ?? ''));
+        if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+            Mailer::send($targetEmail, (string)($user['full_name'] ?: $user['username']), 'ProCast Staff Application Update',
+                sprintf('<p>Hello %s,</p><p>Your application for a staff account (<strong>%s</strong>) was not approved.</p><p><strong>Reason:</strong> %s</p>',
+                    View::e($user['full_name'] ?: $user['username']), View::e($user['username']), View::e($reason)
+                )
+            );
+        }
+
+        $session['sa_flash'] = ['type' => 'success', 'msg' => 'Staff account "' . (string)$user['username'] . '" rejected.'];
+        return Response::redirect('/approvals');
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function regenerateUserCode(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $store = $storeId > 0 ? $this->stores->find($storeId) : null;
+
+        $code = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+        $codeHash = hash('sha256', $code);
+        $ttl = 7 * 86400; // 7 days
+        $expiresUtc = gmdate('Y-m-d H:i:s', time() + $ttl);
+
+        $this->stores->setAccountActivationCode($userId, $codeHash, $expiresUtc, $this->sealCode($code));
+
+        Audit::log($this->db, (int)$admin['id'], Audit::CODE_REGENERATED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $user['username'],
+        ]);
+
+        $targetEmail = trim((string)($user['email'] ?? ''));
+        $targetName = (string)($user['full_name'] ?: $user['username']);
+        $ownerEmail = trim((string)($store['owner_email'] ?? ''));
+        $ownerName = (string)($store['owner_name'] ?? 'Store Owner');
+
+        $cc = [];
+        if ($ownerEmail !== '' && filter_var($ownerEmail, FILTER_VALIDATE_EMAIL) && strtolower($ownerEmail) !== strtolower($targetEmail)) {
+            $cc[] = ['email' => $ownerEmail, 'name' => $ownerName];
+        }
+
+        $mailNote = '';
+        if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+            $subject = 'Your New ProCast 6-Digit Access Code';
+            $html = sprintf(
+                '<p>Hello %s,</p>'
+                . '<p>A new 6-digit access code has been generated for your ProCast account (<strong>%s</strong>):</p>'
+                . '<p style="font-size:32px;font-weight:800;letter-spacing:.3em;color:#2f7ff5;margin:20px 0;">%s</p>'
+                . '<p>Any previous code has been invalidated. This code is valid for 7 days.</p>',
+                View::e($targetName),
+                View::e($user['username']),
+                View::e($code)
+            );
+            [$ok, $msg] = Mailer::send($targetEmail, $targetName, $subject, $html, $cc);
+            $mailNote = $ok ? ' New code emailed to user.' : ' (Email failed: ' . $msg . ')';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'New 6-digit access code for ' . (string)$user['username'] . ' (expires in 7 days)',
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        $session['sa_flash'] = ['type' => 'success', 'msg' => 'New code generated for ' . (string)$user['username'] . '.' . $mailNote];
+
+        $from = $req->queryStr('from') ?: $req->input('from');
+        return Response::redirect($from === 'users' ? '/users' : ($from === 'store' ? '/stores/' . $storeId : '/approvals'));
+    }
+
+    /** Generates 6-digit unlock code for locked Store Owner. */
+    public function generateOwnerUnlockCode(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $owner = $this->stores->ownerOf($storeId);
+        if ($owner === null) {
+            return $this->flashBack($session, $storeId, 'error', 'No owner account found for this store.');
+        }
+
+        $ownerId = (int)$owner['id'];
+        $code = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+        $codeHash = hash('sha256', $code);
+        $ttl = 7 * 86400; // 7 days
+        $expiresUtc = gmdate('Y-m-d H:i:s', time() + $ttl);
+
+        $this->stores->setAccountActivationCode($ownerId, $codeHash, $expiresUtc, $this->sealCode($code));
+
+        Audit::log($this->db, (int)$admin['id'], Audit::OWNER_UNLOCKED, $storeId, $req->ip, $req->userAgent, [
+            'owner_id' => $ownerId,
+            'username' => $owner['username'],
+        ]);
+
+        $ownerEmail = trim((string)($owner['email'] ?? $store['owner_email'] ?? ''));
+        $ownerName = (string)($owner['full_name'] ?: $store['owner_name'] ?: 'Store Owner');
+
+        $mailNote = '';
+        if ($ownerEmail !== '' && filter_var($ownerEmail, FILTER_VALIDATE_EMAIL)) {
+            $subject = 'Your ProCast 6-Digit Activation Unlock Code';
+            $html = sprintf(
+                '<p>Hello %s,</p>'
+                . '<p>Your 6-digit access code to activate and unlock your store <strong>%s</strong> is:</p>'
+                . '<p style="font-size:32px;font-weight:800;letter-spacing:.3em;color:#2f7ff5;margin:20px 0;">%s</p>'
+                . '<p>Open ProCast, sign in, and enter this code when prompted to activate your account with full access.</p>',
+                View::e($ownerName),
+                View::e($store['name']),
+                View::e($code)
+            );
+            [$ok, $msg] = Mailer::send($ownerEmail, $ownerName, $subject, $html);
+            $mailNote = $ok ? ' Unlock code emailed to ' . $ownerEmail . '.' : ' (Email failed: ' . $msg . ')';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => '6-digit unlock code for Store Owner ' . (string)$owner['username'],
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        return $this->flashBack($session, $storeId, 'success', 'Unlock code issued for store owner.' . $mailNote);
+    }
+
     /**
      * @param array<string,mixed> $session
      * @param array<string,mixed> $admin
@@ -884,9 +1112,11 @@ final class SuperAdminDashboardController
         $flash = $session['sa_flash'] ?? null;
         $secret = $session['sa_flash_secret'] ?? null;
         unset($session['sa_flash'], $session['sa_flash_secret']);
+        $pendingApprovalsCount = $this->stores->pendingApprovalsCount();
         return Response::html(View::render($view, $vars + [
             'title' => $title, 'nav' => $nav, 'admin' => $admin,
             'csrf' => Csrf::token($session), 'flash' => $flash, 'flashSecret' => $secret,
+            'pendingApprovalsCount' => $pendingApprovalsCount,
         ]));
     }
 }

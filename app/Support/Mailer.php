@@ -6,7 +6,7 @@ namespace ProCast\Support;
 /** Brevo transactional email (same provider/env vars as the POS). Transport is injectable for tests. */
 final class Mailer
 {
-    /** @var (callable(string,string,string,string):array{0:bool,1:string})|null */
+    /** @var (callable(string,string,string,string,?array):array{0:bool,1:string})|null */
     private static $transport = null;
 
     public static function setTransport(?callable $t): void
@@ -14,23 +14,30 @@ final class Mailer
         self::$transport = $t;
     }
 
-    /** @return array{0:bool,1:string} [ok, message] */
-    public static function send(string $toEmail, string $toName, string $subject, string $html): array
+    /**
+     * @param list<array{email:string,name?:string}>|null $cc
+     * @return array{0:bool,1:string} [ok, message]
+     */
+    public static function send(string $toEmail, string $toName, string $subject, string $html, ?array $cc = null): array
     {
         if (self::$transport !== null) {
-            return (self::$transport)($toEmail, $toName, $subject, $html);
+            return (self::$transport)($toEmail, $toName, $subject, $html, $cc);
         }
         $key = trim((string)Env::get('BREVO_API_KEY', ''));
         $from = trim((string)Env::get('BREVO_SENDER_EMAIL', ''));
         if ($key === '' || $from === '') {
             return [false, 'Email provider is not configured (BREVO_API_KEY / BREVO_SENDER_EMAIL).'];
         }
-        $payload = json_encode([
+        $msgData = [
             'sender'      => ['name' => (string)Env::get('BREVO_SENDER_NAME', 'ProCast'), 'email' => $from],
             'to'          => [['email' => $toEmail, 'name' => $toName]],
             'subject'     => $subject,
             'htmlContent' => $html,
-        ]);
+        ];
+        if (!empty($cc)) {
+            $msgData['cc'] = $cc;
+        }
+        $payload = json_encode($msgData);
         $ch = curl_init('https://api.brevo.com/v3/smtp/email');
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,

@@ -292,7 +292,7 @@ final class StoreRepository
     /** @return array<string,mixed>|null */
     public function findUser(int $id): ?array
     {
-        $st = $this->db->prepare('SELECT id, username, full_name, email, role, store_id, last_login FROM users WHERE id = ?');
+        $st = $this->db->prepare('SELECT * FROM users WHERE id = ?');
         $st->execute([$id]);
         $r = $st->fetch(PDO::FETCH_ASSOC);
         return $r ?: null;
@@ -978,6 +978,8 @@ final class StoreRepository
     public function searchUsers(string $q, int $now, int $limit = 50): array
     {
         $sql = "SELECT u.id, u.username, u.full_name, u.role, u.email, u.store_id, u.last_login,
+                       COALESCE(u.account_status, 'ACTIVE') AS account_status,
+                       u.trial_ends_at, u.activation_code_cipher, u.code_expires_at,
                        s.name AS store_name, s.status AS store_status, s.client_type,
                        COALESCE(NULLIF(s.name, ''), sn.shop_name) AS display_store_name,
                        (SELECT COUNT(*) FROM auth_tokens t WHERE t.user_id = u.id AND t.expires_at > ?) AS live_tokens
@@ -1006,5 +1008,123 @@ final class StoreRepository
     public static function like(string $q): string
     {
         return '%' . addcslashes(strtolower(mb_substr($q, 0, 100)), '%_\\') . '%';
+    }
+
+    /** Total pending approvals count (stores pending + staff accounts pending). */
+    public function pendingApprovalsCount(): int
+    {
+        $storeCount = 0;
+        try {
+            $st = $this->db->query("SELECT COUNT(*) FROM stores WHERE status = 'pending_approval'");
+            $storeCount = (int)$st->fetchColumn();
+        } catch (\Throwable) {}
+
+        $userCount = 0;
+        try {
+            $st = $this->db->query("SELECT COUNT(*) FROM users WHERE account_status = 'PENDING'");
+            $userCount = (int)$st->fetchColumn();
+        } catch (\Throwable) {}
+
+        return $storeCount + $userCount;
+    }
+
+    /** List pending staff accounts waiting for Super Admin approval. */
+    public function pendingStaffAccounts(string $q = '', int $limit = 50): array
+    {
+        try {
+            $sql = "SELECT u.id, u.username, u.full_name, u.role, u.email, u.store_id, u.created_at, u.account_status,
+                           u.activation_code_cipher, u.code_expires_at, u.rejection_reason,
+                           s.name AS store_name,
+                           COALESCE(NULLIF(s.name, ''), sn.shop_name) AS display_store_name,
+                           COALESCE(NULLIF(s.owner_name, ''), ow.full_name) AS owner_name,
+                           COALESCE(NULLIF(s.owner_email, ''), ow.email) AS owner_email
+                      FROM users u
+                      LEFT JOIN stores s ON s.id = u.store_id
+                      LEFT JOIN LATERAL (
+                          SELECT value AS shop_name FROM settings
+                           WHERE store_id = u.store_id AND key = 'shop_name' LIMIT 1
+                      ) sn ON TRUE
+                      LEFT JOIN LATERAL (
+                          SELECT full_name, email FROM users
+                           WHERE store_id = u.store_id AND role = 'owner'
+                           ORDER BY id LIMIT 1
+                      ) ow ON TRUE
+                     WHERE u.account_status = 'PENDING'";
+            $args = [];
+            $q = trim($q);
+            if ($q !== '') {
+                $like = self::like($q);
+                $sql .= " AND (LOWER(u.username) LIKE ? ESCAPE '\\' OR LOWER(u.full_name) LIKE ? ESCAPE '\\'
+                          OR LOWER(COALESCE(u.email,'')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.name,'')) LIKE ? ESCAPE '\\')";
+                array_push($args, $like, $like, $like, $like);
+            }
+            $sql .= ' ORDER BY u.created_at ASC, u.id ASC LIMIT ' . max(1, min(200, $limit));
+            $st = $this->db->prepare($sql);
+            $st->execute($args);
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable) {
+            return [];
+        }
+    }
+
+    /** Approves a pending staff account and assigns a 6-digit activation code. */
+    public function approveStaffAccount(int $userId, string $codeHash, string $expiresAtUtc, ?string $codeCipher = null): bool
+    {
+        $st = $this->db->prepare(
+            "UPDATE users
+                SET account_status = 'ACTIVE',
+                    activation_code = ?,
+                    activation_code_cipher = ?,
+                    code_expires_at = ?,
+                    rejection_reason = NULL
+              WHERE id = ? AND account_status = 'PENDING'"
+        );
+        $st->execute([$codeHash, $codeCipher, $expiresAtUtc, $userId]);
+        return $st->rowCount() === 1;
+    }
+
+    /** Rejects a pending staff account with a required reason. */
+    public function rejectStaffAccount(int $userId, string $reason): bool
+    {
+        $st = $this->db->prepare(
+            "UPDATE users
+                SET account_status = 'REJECTED',
+                    rejection_reason = ?,
+                    activation_code = NULL,
+                    activation_code_cipher = NULL,
+                    code_expires_at = NULL
+              WHERE id = ? AND account_status = 'PENDING'"
+        );
+        $st->execute([$reason, $userId]);
+        return $st->rowCount() === 1;
+    }
+
+    /** Sets/regenerates 6-digit access code for an account. */
+    public function setAccountActivationCode(int $userId, string $codeHash, string $expiresAtUtc, ?string $codeCipher = null): bool
+    {
+        $st = $this->db->prepare(
+            "UPDATE users
+                SET activation_code = ?,
+                    activation_code_cipher = ?,
+                    code_expires_at = ?
+              WHERE id = ?"
+        );
+        $st->execute([$codeHash, $codeCipher, $expiresAtUtc, $userId]);
+        return $st->rowCount() === 1;
+    }
+
+    /** Unlocks a locked store owner account to ACTIVE. */
+    public function unlockOwnerAccount(int $userId): bool
+    {
+        $st = $this->db->prepare(
+            "UPDATE users
+                SET account_status = 'ACTIVE',
+                    activation_code = NULL,
+                    activation_code_cipher = NULL,
+                    code_expires_at = NULL
+              WHERE id = ?"
+        );
+        $st->execute([$userId]);
+        return $st->rowCount() === 1;
     }
 }

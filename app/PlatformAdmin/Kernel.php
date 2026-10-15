@@ -130,6 +130,8 @@ final class Kernel
                     return $dash->telemetry($req, $now);
                 case $path === '/api/health':
                     return $dash->health();
+                case $path === '/approvals':
+                    return $dash->approvals($req, $session, $admin, $now);
                 case $path === '/stores':
                     return $dash->stores($req, $session, $admin);
                 case $path === '/users':
@@ -142,6 +144,18 @@ final class Kernel
         } elseif ($method === 'POST') {
             if ($path === '/logout') {
                 return $this->auth()->logout($req, $session);
+            }
+            if (preg_match('#^/users/(\d{1,10})/approve$#', $path, $m)) {
+                return $dash->approveStaff($req, $session, $admin, (int)$m[1], $now);
+            }
+            if (preg_match('#^/users/(\d{1,10})/reject$#', $path, $m)) {
+                return $dash->rejectStaff($req, $session, $admin, (int)$m[1]);
+            }
+            if (preg_match('#^/users/(\d{1,10})/regenerate-code$#', $path, $m)) {
+                return $dash->regenerateUserCode($req, $session, $admin, (int)$m[1]);
+            }
+            if (preg_match('#^/stores/(\d{1,10})/unlock-code$#', $path, $m)) {
+                return $dash->generateOwnerUnlockCode($req, $session, $admin, (int)$m[1]);
             }
             if (preg_match('#^/users/(\d{1,10})/pairing$#', $path, $m)) {
                 return $dash->issueUserPairing($req, $session, $admin, (int)$m[1]);
