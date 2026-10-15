@@ -149,8 +149,11 @@ $current = (string)($s['client_type'] ?? 'web');
         <tbody>
         <?php foreach ($team as $t): ?>
           <?php
-            $live   = !empty($t['pairing_id']);
-            $expired = $live && !empty($t['pairing_expires_at']) && strtotime((string)$t['pairing_expires_at']) < time();
+            $hasPairing = !empty($t['pairing_id']);
+            $used       = $hasPairing && !empty($t['pairing_used_at']);
+            $live       = $hasPairing && !$used;
+            $expired    = $live && !empty($t['pairing_expires_at']) && strtotime((string)$t['pairing_expires_at']) < time();
+            $digits     = (string)($t['pairing_code'] ?? '');
           ?>
           <tr>
             <td>
@@ -159,68 +162,42 @@ $current = (string)($s['client_type'] ?? 'web');
               <?php if (!empty($t['email'])): ?>
                 <div class="text-muted" style="font-size:.72rem"><?= $e($t['email']) ?></div>
               <?php endif; ?>
-              <?php /* One-click copy of the identity fields, so the admin can paste
-                     them into a message, a spreadsheet or a new hire's record. */ ?>
-              <button type="button" class="btn btn-ghost btn-sm copy-btn" style="margin-top:6px"
-                      data-copy="<?= $e(implode("\t", [
-                          (string)($t['full_name'] ?: $t['username']),
-                          (string)$t['username'],
-                          (string)($t['email'] ?? ''),
-                      ])) ?>"
-                      title="Copy name, username and email"><?= $ico('copy') ?> Copy details</button>
             </td>
             <td class="text-muted"><?= $e($t['role']) ?></td>
             <td>
-              <?php if ($live && !$expired): ?>
+              <?php if ($used): ?>
+                <span class="badge badge-active">Activated</span>
+              <?php elseif ($live && !$expired): ?>
                 <span class="badge badge-pending">Code sent, not yet used</span>
+              <?php elseif ($live && $expired): ?>
+                <span class="badge badge-rejected">Code expired</span>
               <?php else: ?>
                 <span class="badge badge-rejected">Needs a code</span>
               <?php endif; ?>
             </td>
             <td>
-              <?php /* This cell must show THIS person's code state, never the
-                     store-wide one. It used to print $liveCodeText on every row,
-                     so a screen full of rows each displayed the same six digits
-                     and it read as though each person had their own — which is
-                     exactly how one shared code ended up unlocking every account
-                     on a till. A whole-store code names nobody and unlocks
-                     nobody, so it has no business appearing in a per-person
-                     column. Digits are shown on demand via "Copy code". */ ?>
-              <?php if ($live && !$expired): ?>
-                <?php $digits = (string)($t['pairing_code'] ?? ''); ?>
-                <?php if ($digits !== ''): ?>
-                  <div class="store-name" style="letter-spacing:.18em"><?= $e($digits) ?></div>
-                  <button type="button" class="btn btn-ghost btn-sm copy-btn" style="margin-top:6px"
-                          data-copy="<?= $e($digits) ?>"
-                          title="Copy this person's code"><?= $ico('copy') ?> Copy code</button>
-                  <?php if (!empty($t['pairing_role_name'])): ?>
-                    <div class="text-muted" style="font-size:.72rem">Issued for <strong><?= $e((string)$t['pairing_role_name']) ?></strong></div>
-                  <?php endif; ?>
-                <?php else: ?>
-                  <?php /* Encrypted at rest but the key is unavailable or was
-                         rotated, so there is nothing to show. Fall back to the
-                         reveal button, which is the last-resort path. */ ?>
-                  <span class="text-muted" style="font-size:.8rem">Sent &mdash; use &ldquo;Copy code&rdquo;</span>
+              <?php /* This cell shows THIS person's code state. Digits are rendered directly in the cell. */ ?>
+              <?php if ($digits !== ''): ?>
+                <div class="store-name" style="letter-spacing:.18em"><?= $e($digits) ?></div>
+                <?php if ($used): ?>
+                  <div class="text-muted" style="font-size:.72rem">Activated</div>
+                <?php elseif ($expired): ?>
+                  <div class="text-muted" style="font-size:.72rem">Expired</div>
+                <?php elseif (!empty($t['pairing_role_name'])): ?>
+                  <div class="text-muted" style="font-size:.72rem">Issued for <strong><?= $e((string)$t['pairing_role_name']) ?></strong></div>
                 <?php endif; ?>
+              <?php elseif ($used): ?>
+                <span class="text-muted" style="font-size:.8rem">Activated</span>
+              <?php elseif ($live && !$expired): ?>
+                <span class="text-muted" style="font-size:.8rem">Code sent</span>
+              <?php elseif ($live && $expired): ?>
+                <span class="text-muted" style="font-size:.8rem">Expired</span>
               <?php else: ?>
                 <span class="text-muted" style="font-size:.8rem">Not issued</span>
               <?php endif; ?>
             </td>
             <td>
               <?php if ($live && !$expired): ?>
-                <form method="POST" action="/platform-admin/users/<?= (int)$t['id'] ?>/pairing/reveal" style="display:inline">
-                  <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
-                  <button type="submit" class="btn btn-emerald btn-sm" title="Show this code again so you can copy or read it out"><?= $ico('copy') ?> Copy code</button>
-                </form>
-                <button class="btn btn-primary btn-sm" style="margin-left:6px" data-confirm='<?= json_encode([
-                  "title"   => "Replace the live code?",
-                  "desc"    => "Replace the live code if the first code expired and is not been use. A new activation code will be generated for " . addslashes($t['full_name'] ?: $t['username']) . " and the current one will stop working.",
-                  "action"  => "/platform-admin/users/" . $t['id'] . "/pairing",
-                  "btnClass"=> "btn-primary",
-                  "btnLabel"=> "Replace code",
-                  "redirect"=> "/platform-admin/stores/" . $s['id'],
-                ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('mail') ?> Send code</button>
-              <?php else: ?>
                 <button class="btn btn-primary btn-sm" data-confirm='<?= json_encode([
                   "title"   => "Replace the live code?",
                   "desc"    => "Replace the live code if the first code expired and is not been use. A new activation code will be generated for " . addslashes($t['full_name'] ?: $t['username']) . " and the current one will stop working.",
@@ -229,15 +206,7 @@ $current = (string)($s['client_type'] ?? 'web');
                   "btnLabel"=> "Replace code",
                   "redirect"=> "/platform-admin/stores/" . $s['id'],
                 ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('mail') ?> Send code</button>
-              <?php endif; ?>
-              <?php /* Revoke is offered ONLY while a code is actually outstanding.
-                     "New code" already retires a live one as a side effect, so past
-                     that point revoke would have nothing to act on and would just
-                     be a second way to reach the same end. It is also deliberately
-                     NOT bundled with "New code": revoke has to stand alone for the
-                     case where minting a replacement is exactly what to avoid —
-                     a code that leaked to the wrong person. */ ?>
-              <?php if ($live && !$expired): ?>
+                <?php /* Revoke is offered ONLY while a code is actually outstanding. */ ?>
                 <button class="btn btn-rose btn-sm" style="margin-left:6px" data-confirm='<?= json_encode([
                   "title"       => "Revoke this code?",
                   "desc"        => "This activation code stops working immediately and no replacement is issued. " . addslashes($t['full_name'] ?: $t['username']) . " will need a new code before they can activate another till.",
@@ -247,6 +216,15 @@ $current = (string)($s['client_type'] ?? 'web');
                   "btnLabel"    => "Revoke code",
                   "redirect"    => "/platform-admin/stores/" . $s['id'],
                 ], JSON_UNESCAPED_UNICODE) ?>'>⊘ Revoke</button>
+              <?php else: ?>
+                <button class="btn btn-primary btn-sm" data-confirm='<?= json_encode([
+                  "title"   => "Replace the live code?",
+                  "desc"    => "Replace the live code if the first code expired and is not been use. A new activation code will be generated for " . addslashes($t['full_name'] ?: $t['username']) . " and the current one will stop working.",
+                  "action"  => "/platform-admin/users/" . $t['id'] . "/pairing",
+                  "btnClass"=> "btn-primary",
+                  "btnLabel"=> "Replace code",
+                  "redirect"=> "/platform-admin/stores/" . $s['id'],
+                ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('mail') ?> Send code</button>
               <?php endif; ?>
             </td>
           </tr>
