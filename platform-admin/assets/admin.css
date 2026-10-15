@@ -1580,3 +1580,5 @@ html.theme-light .pa-progress-wrap {
 }
 
 .mb-6{margin-bottom:24px}
+.pa-actions{display:grid;gap:6px;grid-template-columns:repeat(auto-fit,minmax(80px,1fr))}
+.pa-actions > *{width:100%}

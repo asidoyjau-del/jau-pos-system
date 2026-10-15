@@ -291,6 +291,13 @@ $current = (string)($s['client_type'] ?? 'web');
         "redirect"=> "/platform-admin/stores",
       ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('play') ?> Reactivate Store</button>
     <?php endif; ?>
+
+    <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/unlock-code" style="display:inline;">
+      <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
+      <button type="submit" class="btn btn-primary" title="Generate 6-digit access code to unlock or activate the store owner">
+        <?= $ico('key') ?> Generate Owner Unlock Code
+      </button>
+    </form>
   </div>
 </div>
 

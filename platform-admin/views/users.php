@@ -50,7 +50,7 @@ foreach ($rows as $r) {
     <table class="pa-table">
       <thead>
         <tr>
-          <th>User</th><th>Role</th><th>Store</th><th>Client</th><th>Store Status</th><th>Last Login</th><th>Active Tokens</th><th>Copy</th>
+          <th>User</th><th>Role</th><th>Store</th><th>Account Status</th><th>Store Status</th><th>Last Login</th><th>Live Tokens</th><th>Copy</th>
         </tr>
       </thead>
       <tbody>
@@ -63,8 +63,25 @@ foreach ($rows as $r) {
           $sessionBadge = $active ? '<span class="badge badge-online">Online</span>' : '';
           $sinceMin = $lastLogin ? round((time() - strtotime($lastLogin)) / 60) : null;
           $sinceStr = $sinceMin === null ? '—' : ($sinceMin < 1440 ? $sinceMin.'m ago' : round($sinceMin/1440).'d ago');
-          // Per-row clipboard payload: name / username / email only — never any
-          // token or hash. The Inspector query returns no secrets to begin with.
+          // Account lifecycle badge
+          $accStatus = (string)($u['account_status'] ?? 'ACTIVE');
+          $trialEnds = !empty($u['trial_ends_at']) ? strtotime((string)$u['trial_ends_at']) : null;
+          $trialDaysLeft = $trialEnds !== null ? max(0, ceil(($trialEnds - $now) / 86400)) : null;
+
+          $accBadgeClass = match ($accStatus) {
+              'ACTIVE'   => 'badge-active',
+              'TRIAL'    => 'badge-pending',
+              'PENDING'  => 'badge-pending',
+              'LOCKED'   => 'badge-rejected',
+              'REJECTED' => 'badge-rejected',
+              default    => 'badge-client',
+          };
+          $accLabel = $accStatus;
+          if ($accStatus === 'TRIAL' && $trialDaysLeft !== null) {
+              $accLabel = "TRIAL ({$trialDaysLeft}d left)";
+          }
+
+          // Per-row clipboard payload
           $clipRow = implode("\t", [
               (string)($u['full_name'] ?? ''),
               (string)($u['username'] ?? ''),
@@ -88,12 +105,7 @@ foreach ($rows as $r) {
             <?php endif; ?>
           </td>
           <td>
-            <?php
-              $ct      = (string)($u['client_type'] ?? 'web');
-              $ctLabel = $clientLabels[$ct] ?? 'Web';
-              $ctClass = $ct === 'app' ? 'app' : ($ct === 'local' ? 'local' : '');
-            ?>
-            <span class="badge-client <?= $e($ctClass) ?>"><?= $e($ctLabel) ?></span>
+            <span class="badge <?= $e($accBadgeClass) ?>"><?= $e($accLabel) ?></span>
           </td>
           <td>
             <?php if (!empty($u['store_status'])): ?>
@@ -108,8 +120,17 @@ foreach ($rows as $r) {
             <?= $e($u['live_tokens']) ?>
           </td>
           <td>
-            <button type="button" class="btn btn-ghost btn-sm copy-btn" data-copy="<?= $e($clipRow) ?>"
-                    title="Copy name, username and email"><?= $ico('copy') ?></button>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <form method="POST" action="/platform-admin/users/<?= $e($u['id']) ?>/regenerate-code" style="display:inline;">
+                <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
+                <input type="hidden" name="from" value="users">
+                <button type="submit" class="btn btn-ghost btn-sm" title="Regenerate 6-Digit Code" style="padding:2px 6px;font-size:0.75rem;">
+                  <?= $ico('refresh') ?> Code
+                </button>
+              </form>
+              <button type="button" class="btn btn-ghost btn-sm copy-btn" data-copy="<?= $e($clipRow) ?>"
+                      title="Copy name, username and email"><?= $ico('copy') ?></button>
+            </div>
           </td>
         </tr>
       <?php endforeach; endif; ?>
