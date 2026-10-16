@@ -248,19 +248,26 @@ $current = (string)($s['client_type'] ?? 'web');
 <?php endif; ?>
 
 <div class="pa-card mb-6">
-  <div class="pa-card-header"><span class="pa-card-title"><?= $ico('zap') ?> Lifecycle</span></div>
-  <div class="pa-card-body flex gap-3" style="flex-wrap:wrap">
+  <div class="pa-card-header" style="display:flex;align-items:center;justify-content:space-between;">
+    <span class="pa-card-title"><?= $ico('zap') ?> Lifecycle</span>
+    <span class="badge badge-<?= $s['status'] === 'active' ? 'active' : ($s['status'] === 'pending_approval' ? 'pending' : ($s['status'] === 'suspended' ? 'suspended' : 'rejected')) ?>">
+      <?= strtoupper(str_replace('_', ' ', $s['status'])) ?>
+    </span>
+  </div>
+  <div class="pa-card-body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
     <?php if ($s['status'] === 'pending_approval'): ?>
-      <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/approve" style="display:flex;gap:8px;align-items:center">
+      <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/approve" style="display:inline-flex;align-items:center;gap:8px;margin:0;">
         <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
-        <select name="subscription_tier" class="form-control" style="width:140px">
+        <select name="subscription_tier" class="form-control" style="width:130px;height:38px;padding:0 12px;font-size:.82rem;font-weight:600;border-radius:var(--radius-sm);box-sizing:border-box;cursor:pointer;">
           <option value="free">Free</option>
           <option value="standard" selected>Standard</option>
           <option value="pro">Pro</option>
         </select>
-        <button type="submit" class="btn btn-emerald"><?= $ico('check') ?> Approve</button>
+        <button type="submit" class="btn btn-emerald" style="height:38px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:.82rem;font-weight:600;box-sizing:border-box;">
+          <?= $ico('check') ?> Approve
+        </button>
       </form>
-      <button class="btn btn-rose" data-confirm='<?= json_encode([
+      <button class="btn btn-rose" style="height:38px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:.82rem;font-weight:600;box-sizing:border-box;" data-confirm='<?= json_encode([
         "title" => "Reject store?",
         "desc"  => "Reject this store. The applicant will be notified with your reason.",
         "requireReason" => true,
@@ -270,7 +277,7 @@ $current = (string)($s['client_type'] ?? 'web');
       ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('x') ?> Reject</button>
 
     <?php elseif ($s['status'] === 'active'): ?>
-      <button class="btn btn-amber" data-confirm='<?= json_encode([
+      <button class="btn btn-amber" style="height:38px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:.82rem;font-weight:600;box-sizing:border-box;" data-confirm='<?= json_encode([
         "title" => "Suspend store?",
         "desc"  => "Suspending this store signs out every user from the online site, the local POS and the ProCast app, and revokes their API key immediately.",
         // Must match SuperAdminDashboardController::suspend(), which authorises
@@ -283,7 +290,7 @@ $current = (string)($s['client_type'] ?? 'web');
       ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('pause') ?> Suspend Store</button>
 
     <?php elseif ($s['status'] === 'suspended'): ?>
-      <button class="btn btn-emerald" data-confirm='<?= json_encode([
+      <button class="btn btn-emerald" style="height:38px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:.82rem;font-weight:600;box-sizing:border-box;" data-confirm='<?= json_encode([
         "title" => "Reactivate store?",
         "desc"  => "This will issue a new API key for this store.",
         "action"  => "/platform-admin/stores/" . $s['id'] . "/reactivate",
@@ -292,9 +299,9 @@ $current = (string)($s['client_type'] ?? 'web');
       ], JSON_UNESCAPED_UNICODE) ?>'><?= $ico('play') ?> Reactivate Store</button>
     <?php endif; ?>
 
-    <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/unlock-code" style="display:inline;">
+    <form method="POST" action="/platform-admin/stores/<?= $e($s['id']) ?>/unlock-code" style="display:inline-flex;margin:0;">
       <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
-      <button type="submit" class="btn btn-primary" title="Generate 6-digit access code to unlock or activate the store owner">
+      <button type="submit" class="btn btn-primary" style="height:38px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:.82rem;font-weight:600;box-sizing:border-box;" title="Generate 6-digit access code to unlock or activate the store owner">
         <?= $ico('key') ?> Generate Owner Unlock Code
       </button>
     </form>
