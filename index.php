@@ -14141,12 +14141,6 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
      controllable from Settings → Appearance. -->
             <div class="nav-right">
                 <button type="button" id="theme-toggle-btn" class="nav-link" style="padding:6px 9px;" title="Switch to light mode" onclick="toggleTheme()">🌙</button>
-                <?php if ($isTrialAccount): ?>
-                    <span class="trial-pill" style="display:inline-flex;align-items:center;gap:5px;background:rgba(245,158,11,0.15);color:#b45309;border:1px solid rgba(245,158,11,0.4);padding:3px 10px;border-radius:14px;font-size:0.75rem;font-weight:700;" title="Your store is on a 7-day free trial">
-                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                        7-Day Free Trial (<?= $trialDaysLeft ?> <?= $trialDaysLeft === 1 ? 'day' : 'days' ?> left)
-                    </span>
-                <?php endif; ?>
                 <span class="nav-user-name" title="<?= htmlspecialchars($currentUser['full_name']) ?>"><?= htmlspecialchars($currentUser['full_name']) ?></span>
                 <?php if ($isCashierRole): ?>
                     <!-- Cashiers have no direct Logout link — the only way out is completing
