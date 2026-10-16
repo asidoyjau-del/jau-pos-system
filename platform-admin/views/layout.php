@@ -44,7 +44,7 @@ $navActive = $nav ?? '';
       <a href="/platform-admin/analytics" class="pa-nav-link <?= $navActive==='analytics'?'active':'' ?>">
         <span class="pa-nav-icon"><?= $ico('bar-chart') ?></span> Analytics
       </a>
-      <a href="/platform-admin/approvals" class="pa-nav-link <?= $navActive==='approvals'?'active':'' ?>">
+      <a href="/platform-admin/approvals" class="pa-nav-link <?= $navActive==='approvals'?'active':'' ?>" style="display:none;">
         <span class="pa-nav-icon"><?= $ico('check') ?></span> Approvals
         <?php if (!empty($pendingApprovalsCount) && (int)$pendingApprovalsCount > 0): ?>
         <span class="badge badge-pending" style="margin-left:auto;font-size:0.75rem;padding:2px 7px;border-radius:10px;"><?= (int)$pendingApprovalsCount ?></span>
@@ -52,6 +52,9 @@ $navActive = $nav ?? '';
       </a>
       <a href="/platform-admin/stores" class="pa-nav-link <?= $navActive==='stores'?'active':'' ?>">
         <span class="pa-nav-icon"><?= $ico('store') ?></span> Stores
+        <?php if (!empty($pendingApprovalsCount) && (int)$pendingApprovalsCount > 0): ?>
+        <span class="badge badge-pending" style="margin-left:auto;font-size:0.75rem;padding:2px 7px;border-radius:10px;"><?= (int)$pendingApprovalsCount ?></span>
+        <?php endif; ?>
       </a>
       <a href="/platform-admin/users" class="pa-nav-link <?= $navActive==='users'?'active':'' ?>">
         <span class="pa-nav-icon"><?= $ico('users') ?></span> User Inspector

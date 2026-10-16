@@ -50,6 +50,50 @@ $clientTypes = [
       <?php if (empty($rows)): ?>
         <tr><td colspan="8" class="text-muted" style="text-align:center;padding:32px">No stores found.</td></tr>
       <?php else: foreach ($rows as $r): ?>
+        <?php if (($r['entry_type'] ?? 'store') === 'staff'): ?>
+        <!-- ── Staff / Cashier account row ────────────────────────── -->
+        <tr style="background:<?= $r['status'] === 'rejected' ? 'rgba(225,29,72,.04)' : 'rgba(59,130,246,.04)' ?>">
+          <td>
+            <div class="store-name" style="display:flex;align-items:center;gap:6px;">
+              <span class="badge badge-client app" style="font-size:.65rem;padding:1px 6px;"><?= $e(ucfirst((string)($r['role'] ?? 'staff'))) ?></span>
+              <?= $e($r['full_name'] ?: $r['username']) ?>
+            </div>
+            <div class="text-muted font-mono">@<?= $e($r['username']) ?></div>
+          </td>
+          <td>
+            <?php if (!empty($r['display_store_name'])): ?>
+            <div style="font-weight:500"><?= $e($r['display_store_name']) ?></div>
+            <?php else: ?>
+            <div class="text-muted">—</div>
+            <?php endif; ?>
+            <div class="text-muted" style="font-size:.72rem"><?= $e($r['owner_name'] ?? '') ?></div>
+          </td>
+          <td class="text-muted"><?= $e($r['email'] ?? '') ?></td>
+          <td><span class="badge badge-client">Staff</span></td>
+          <td><span class="badge <?= $e($badgeMap[$r['status']] ?? '') ?>"><?= $e($r['status']) ?></span></td>
+          <td class="text-muted"><?= $e(ucfirst((string)($r['role'] ?? 'staff'))) ?></td>
+          <td class="text-muted"><?= $e(substr($r['created_at'] ?? '', 0, 10)) ?></td>
+          <td class="pa-actions-cell">
+            <div class="pa-actions">
+              <?php if ($r['status'] === 'pending_approval'): ?>
+              <form method="POST" action="/platform-admin/users/<?= $e($r['id']) ?>/approve" style="display:inline;">
+                <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
+                <button type="submit" class="btn btn-emerald btn-sm" title="Approve account & issue 6-digit access code"><?= $ico('check') ?> Approve</button>
+              </form>
+              <form method="POST" action="/platform-admin/users/<?= $e($r['id']) ?>/reject" style="display:inline;"
+                    onsubmit="const r = prompt('Reason for rejecting <?= $e($r['username']) ?>:'); if (!r) return false; this.reason.value = r;">
+                <input type="hidden" name="csrf" value="<?= $e($csrf) ?>">
+                <input type="hidden" name="reason" value="">
+                <button type="submit" class="btn btn-rose btn-sm" title="Reject application"><?= $ico('x') ?> Reject</button>
+              </form>
+              <?php elseif ($r['status'] === 'rejected'): ?>
+              <span class="text-muted" style="font-size:.78rem;" title="<?= $e($r['rejection_reason'] ?? '') ?>">Rejected</span>
+              <?php endif; ?>
+            </div>
+          </td>
+        </tr>
+        <?php else: ?>
+        <!-- ── Store row (original) ──────────────────────────────── -->
         <tr>
           <td>
             <div class="store-name"><a href="/platform-admin/stores/<?= $e($r['id']) ?>"><?= $e($r['display_name'] ?: $r['name']) ?></a></div>
@@ -126,8 +170,10 @@ $clientTypes = [
             </div>
           </td>
         </tr>
+        <?php endif; ?>
       <?php endforeach; endif; ?>
       </tbody>
     </table>
   </div>
 </div>
+
