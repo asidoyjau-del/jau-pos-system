@@ -945,20 +945,11 @@ final class SuperAdminDashboardController
         return Response::redirect('/stores/' . $storeId);
     }
 
-    // ── Approvals Queue ──────────────────────────────────────────────────
+    // ── Approvals Queue (redirected to Stores page) ──────────────────────
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
     public function approvals(Request $req, array &$session, array $admin, int $now): Response
     {
-        $q = mb_substr($req->queryStr('q'), 0, 100);
-        $pendingStores = $this->stores->list('pending_approval', $q, 100);
-        $pendingStaff = $this->stores->pendingStaffAccounts($q, 100);
-
-        return $this->page('approvals', $session, $admin, 'Pending Approvals', 'approvals', [
-            'pendingStores' => $pendingStores,
-            'pendingStaff'  => $pendingStaff,
-            'q'             => $q,
-            'now'           => $now,
-        ]);
+        return Response::redirect('/stores?status=pending_approval');
     }
 
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
