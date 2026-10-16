@@ -1077,7 +1077,7 @@ final class StoreRepository
                            WHERE store_id = u.store_id AND role = 'owner'
                            ORDER BY id LIMIT 1
                       ) ow ON TRUE
-                     WHERE u.account_status = 'PENDING'";
+                     WHERE u.account_status = 'PENDING' AND u.role != 'owner'";
             $args = [];
             $q = trim($q);
             if ($q !== '') {
@@ -1091,7 +1091,74 @@ final class StoreRepository
             $st->execute($args);
             return $st->fetchAll(PDO::FETCH_ASSOC);
         } catch (\Throwable) {
-            return [];
+            try {
+                $sql = "SELECT u.id, u.username, u.full_name, u.role, u.email, u.store_id, u.created_at, u.account_status,
+                               u.activation_code_cipher, u.code_expires_at, u.rejection_reason,
+                               s.name AS store_name,
+                               s.name AS display_store_name,
+                               '' AS owner_name,
+                               '' AS owner_email
+                          FROM users u
+                          LEFT JOIN stores s ON s.id = u.store_id
+                         WHERE u.account_status = 'PENDING' AND u.role != 'owner'";
+                $st = $this->db->query($sql);
+                return $st ? $st->fetchAll(PDO::FETCH_ASSOC) : [];
+            } catch (\Throwable) {
+                return [];
+            }
+        }
+    }
+
+    /** List rejected staff accounts. */
+    public function rejectedStaffAccounts(string $q = '', int $limit = 50): array
+    {
+        try {
+            $sql = "SELECT u.id, u.username, u.full_name, u.role, u.email, u.store_id, u.created_at, u.account_status,
+                           u.activation_code_cipher, u.code_expires_at, u.rejection_reason,
+                           s.name AS store_name,
+                           COALESCE(NULLIF(s.name, ''), sn.shop_name) AS display_store_name,
+                           COALESCE(NULLIF(s.owner_name, ''), ow.full_name) AS owner_name,
+                           COALESCE(NULLIF(s.owner_email, ''), ow.email) AS owner_email
+                      FROM users u
+                      LEFT JOIN stores s ON s.id = u.store_id
+                      LEFT JOIN LATERAL (
+                          SELECT value AS shop_name FROM settings
+                           WHERE store_id = u.store_id AND key = 'shop_name' LIMIT 1
+                      ) sn ON TRUE
+                      LEFT JOIN LATERAL (
+                          SELECT full_name, email FROM users
+                           WHERE store_id = u.store_id AND role = 'owner'
+                           ORDER BY id LIMIT 1
+                      ) ow ON TRUE
+                     WHERE u.account_status = 'REJECTED' AND u.role != 'owner'";
+            $args = [];
+            $q = trim($q);
+            if ($q !== '') {
+                $like = self::like($q);
+                $sql .= " AND (LOWER(u.username) LIKE ? ESCAPE '\\' OR LOWER(u.full_name) LIKE ? ESCAPE '\\'
+                          OR LOWER(COALESCE(u.email,'')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.name,'')) LIKE ? ESCAPE '\\')";
+                array_push($args, $like, $like, $like, $like);
+            }
+            $sql .= ' ORDER BY u.created_at DESC, u.id DESC LIMIT ' . max(1, min(200, $limit));
+            $st = $this->db->prepare($sql);
+            $st->execute($args);
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (\Throwable) {
+            try {
+                $sql = "SELECT u.id, u.username, u.full_name, u.role, u.email, u.store_id, u.created_at, u.account_status,
+                               u.activation_code_cipher, u.code_expires_at, u.rejection_reason,
+                               s.name AS store_name,
+                               s.name AS display_store_name,
+                               '' AS owner_name,
+                               '' AS owner_email
+                          FROM users u
+                          LEFT JOIN stores s ON s.id = u.store_id
+                         WHERE u.account_status = 'REJECTED' AND u.role != 'owner'";
+                $st = $this->db->query($sql);
+                return $st ? $st->fetchAll(PDO::FETCH_ASSOC) : [];
+            } catch (\Throwable) {
+                return [];
+            }
         }
     }
 

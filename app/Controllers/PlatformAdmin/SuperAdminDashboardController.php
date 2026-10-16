@@ -184,8 +184,79 @@ final class SuperAdminDashboardController
         $status = $req->queryStr('status', 'all');
         $filter = $status === 'all' ? null : (in_array($status, StoreRepository::STATUSES, true) ? $status : null);
         $q = $req->queryStr('q');
+
+        // Tag every store row so the view can distinguish them from staff rows.
+        $storeRows = $this->stores->list($filter, $q);
+        foreach ($storeRows as &$sr) {
+            $sr['entry_type'] = 'store';
+        }
+        unset($sr);
+
+        // Merge pending/rejected staff accounts directly into the same table so
+        // the super admin can approve or reject them without leaving this page.
+        if ($filter === 'pending_approval' || $filter === null) {
+            $pendingStaff = $this->stores->pendingStaffAccounts($q, 100);
+            foreach ($pendingStaff as $ps) {
+                $storeRows[] = [
+                    'entry_type'        => 'staff',
+                    'id'                => (int)$ps['id'],
+                    'name'              => $ps['full_name'] ?: $ps['username'],
+                    'display_name'      => $ps['full_name'] ?: $ps['username'],
+                    'display_owner'     => $ps['owner_name'] ?? '—',
+                    'display_email'     => $ps['email'] ?? '',
+                    'contact_phone'     => '',
+                    'client_type'       => null,
+                    'status'            => 'pending_approval',
+                    'subscription_tier' => $ps['role'] ?? 'staff',
+                    'registered_at'     => $ps['created_at'] ?? '',
+                    'created_at'        => $ps['created_at'] ?? '',
+                    // Staff-specific fields for the view
+                    'username'          => $ps['username'],
+                    'full_name'         => $ps['full_name'] ?? '',
+                    'role'              => $ps['role'] ?? 'staff',
+                    'email'             => $ps['email'] ?? '',
+                    'store_id'          => $ps['store_id'] ?? null,
+                    'store_name'        => $ps['store_name'] ?? '',
+                    'display_store_name'=> $ps['display_store_name'] ?? $ps['store_name'] ?? '',
+                    'owner_name'        => $ps['owner_name'] ?? '',
+                    'owner_email'       => $ps['owner_email'] ?? '',
+                    'account_status'    => $ps['account_status'] ?? 'PENDING',
+                ];
+            }
+        }
+        if ($filter === 'rejected' || $filter === null) {
+            $rejectedStaff = $this->stores->rejectedStaffAccounts($q, 100);
+            foreach ($rejectedStaff as $rs) {
+                $storeRows[] = [
+                    'entry_type'        => 'staff',
+                    'id'                => (int)$rs['id'],
+                    'name'              => $rs['full_name'] ?: $rs['username'],
+                    'display_name'      => $rs['full_name'] ?: $rs['username'],
+                    'display_owner'     => $rs['owner_name'] ?? '—',
+                    'display_email'     => $rs['email'] ?? '',
+                    'contact_phone'     => '',
+                    'client_type'       => null,
+                    'status'            => 'rejected',
+                    'subscription_tier' => $rs['role'] ?? 'staff',
+                    'registered_at'     => $rs['created_at'] ?? '',
+                    'created_at'        => $rs['created_at'] ?? '',
+                    'username'          => $rs['username'],
+                    'full_name'         => $rs['full_name'] ?? '',
+                    'role'              => $rs['role'] ?? 'staff',
+                    'email'             => $rs['email'] ?? '',
+                    'store_id'          => $rs['store_id'] ?? null,
+                    'store_name'        => $rs['store_name'] ?? '',
+                    'display_store_name'=> $rs['display_store_name'] ?? $rs['store_name'] ?? '',
+                    'owner_name'        => $rs['owner_name'] ?? '',
+                    'owner_email'       => $rs['owner_email'] ?? '',
+                    'account_status'    => $rs['account_status'] ?? 'REJECTED',
+                    'rejection_reason'  => $rs['rejection_reason'] ?? '',
+                ];
+            }
+        }
+
         return $this->page('stores', $session, $admin, 'Store applications', 'stores', [
-            'rows' => $this->stores->list($filter, $q),
+            'rows' => $storeRows,
             'status' => $filter ?? 'all',
             'q' => mb_substr($q, 0, 100),
             'counts' => $this->stores->counts(),
@@ -907,7 +978,7 @@ final class SuperAdminDashboardController
 
         if (!$this->stores->approveStaffAccount($userId, $codeHash, $expiresUtc, $this->sealCode($code))) {
             $session['sa_flash'] = ['type' => 'error', 'msg' => 'Could not approve staff account — it may already be approved.'];
-            return Response::redirect('/approvals');
+            return Response::redirect('/stores?status=pending_approval');
         }
 
         Audit::log($this->db, (int)$admin['id'], Audit::STAFF_APPROVED, $storeId, $req->ip, $req->userAgent, [
@@ -952,7 +1023,7 @@ final class SuperAdminDashboardController
             'isCode' => true,
         ];
         $session['sa_flash'] = ['type' => 'success', 'msg' => 'Staff account "' . (string)$user['username'] . '" approved.' . $mailNote];
-        return Response::redirect('/approvals');
+        return Response::redirect('/stores?status=pending_approval');
     }
 
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
@@ -970,7 +1041,7 @@ final class SuperAdminDashboardController
 
         if (!$this->stores->rejectStaffAccount($userId, $reason)) {
             $session['sa_flash'] = ['type' => 'error', 'msg' => 'Could not reject staff account.'];
-            return Response::redirect('/approvals');
+            return Response::redirect('/stores?status=pending_approval');
         }
 
         Audit::log($this->db, (int)$admin['id'], Audit::STAFF_REJECTED, $storeId, $req->ip, $req->userAgent, [
@@ -988,7 +1059,7 @@ final class SuperAdminDashboardController
         }
 
         $session['sa_flash'] = ['type' => 'success', 'msg' => 'Staff account "' . (string)$user['username'] . '" rejected.'];
-        return Response::redirect('/approvals');
+        return Response::redirect('/stores?status=pending_approval');
     }
 
     /** @param array<string,mixed> $session @param array<string,mixed> $admin */
