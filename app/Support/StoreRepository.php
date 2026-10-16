@@ -212,6 +212,19 @@ final class StoreRepository
             }
             $out['total'] += (int)$r['c'];
         }
+        try {
+            $st = $this->db->query("SELECT account_status, COUNT(*) AS c FROM users GROUP BY account_status");
+            $userCounts = [];
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $ur) {
+                $userCounts[strtoupper((string)$ur['account_status'])] = (int)$ur['c'];
+            }
+            $pendingUsers = $userCounts['PENDING'] ?? 0;
+            $rejectedUsers = $userCounts['REJECTED'] ?? 0;
+            $out['pending_users'] = $pendingUsers;
+            $out['rejected_users'] = $rejectedUsers;
+            $out['pending_approval'] = max($out['pending_approval'], $pendingUsers);
+            $out['rejected'] = max($out['rejected'], $rejectedUsers);
+        } catch (\Throwable) {}
         return $out;
     }
 
@@ -306,7 +319,15 @@ final class StoreRepository
              WHERE id=? AND status='pending_approval'"
         );
         $st->execute([$adminId, $nowUtc, $tier, $tokenHash, $id]);
-        return $st->rowCount() === 1;
+        if ($st->rowCount() === 1) {
+            try {
+                $trialEndsAt = date('Y-m-d H:i:s', time() + 7 * 86400);
+                $this->db->prepare("UPDATE users SET account_status = 'TRIAL', trial_ends_at = ?, rejection_reason = NULL WHERE store_id = ? AND role = 'owner'")
+                    ->execute([$trialEndsAt, $id]);
+            } catch (\Throwable) {}
+            return true;
+        }
+        return false;
     }
 
     /** pending_approval -> rejected (reason mandatory, enforced by caller + DB CHECK). */
@@ -314,7 +335,14 @@ final class StoreRepository
     {
         $st = $this->db->prepare("UPDATE stores SET status='rejected', rejection_reason=?, database_sync_token=NULL WHERE id=? AND status='pending_approval'");
         $st->execute([$reason, $id]);
-        return $st->rowCount() === 1;
+        if ($st->rowCount() === 1) {
+            try {
+                $this->db->prepare("UPDATE users SET account_status = 'REJECTED', rejection_reason = ? WHERE store_id = ? AND role = 'owner'")
+                    ->execute([$reason, $id]);
+            } catch (\Throwable) {}
+            return true;
+        }
+        return false;
     }
 
     /** active -> suspended (API key voided). */
@@ -1019,13 +1047,13 @@ final class StoreRepository
             $storeCount = (int)$st->fetchColumn();
         } catch (\Throwable) {}
 
-        $userCount = 0;
+        $staffCount = 0;
         try {
-            $st = $this->db->query("SELECT COUNT(*) FROM users WHERE account_status = 'PENDING'");
-            $userCount = (int)$st->fetchColumn();
+            $st = $this->db->query("SELECT COUNT(*) FROM users WHERE account_status = 'PENDING' AND role != 'owner'");
+            $staffCount = (int)$st->fetchColumn();
         } catch (\Throwable) {}
 
-        return $storeCount + $userCount;
+        return $storeCount + $staffCount;
     }
 
     /** List pending staff accounts waiting for Super Admin approval. */
