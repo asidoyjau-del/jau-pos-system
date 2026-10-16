@@ -8338,13 +8338,14 @@ if ($page === 'signup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $db = db();
                 $db->beginTransaction();
-                // A brand-new, empty store for this owner — separate from
-                // every other store in the system. Immediate access under TRIAL for 7 days.
-                $trialEndsAt = date('Y-m-d H:i:s', time() + 7 * 86400);
-                $db->exec("INSERT INTO stores (name, status) VALUES ('ProCast', 'active')");
+                // A brand-new store for this owner in pending_approval state awaiting Super Admin review.
+                // Upon Super Admin approval, the 7-day free trial will activate automatically.
+                $registeredAt = date('Y-m-d H:i:s');
+                $db->prepare("INSERT INTO stores (name, status, owner_name, owner_email, registered_at) VALUES ('ProCast', 'pending_approval', ?, ?, ?)")
+                    ->execute([$fullName, $email, $registeredAt]);
                 $newStoreId = (int)lastInsertedId($db);
-                $db->prepare("INSERT INTO users (username,password,full_name,email,role,store_id,account_status,trial_ends_at) VALUES (?,?,?,?,'owner',?,'TRIAL',?)")
-                    ->execute([$username, password_hash($pw, PASSWORD_DEFAULT), $fullName, $email, $newStoreId, $trialEndsAt]);
+                $db->prepare("INSERT INTO users (username,password,full_name,email,role,store_id,account_status,trial_ends_at) VALUES (?,?,?,?,'owner',?,'PENDING',NULL)")
+                    ->execute([$username, password_hash($pw, PASSWORD_DEFAULT), $fullName, $email, $newStoreId]);
                 // Seed this store with its own starter settings + default
                 // categories, same as what a fresh install gets — a new
                 // store shouldn't start with literally nothing to pick from.
@@ -8354,7 +8355,7 @@ if ($page === 'signup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     ->execute([$newStoreId, $newStoreId, $newStoreId, $newStoreId, $newStoreId]);
                 $db->commit();
                 $_SESSION['signup_success'] = true;
-                header('Location: ?page=login&signup=success');
+                header('Location: ?page=login&signup=pending');
                 exit;
             } catch (Exception $e) {
                 if ($db->inTransaction()) $db->rollBack();
@@ -8389,6 +8390,24 @@ restoreLoginFromCookie();
 if ($page !== 'login' && $page !== 'forgot' && $page !== 'reset' && $page !== 'signup' && $page !== 'landing') requireLogin();
 
 $currentUser = loggedIn() ? ['id' => $_SESSION['uid'], 'username' => $_SESSION['username'], 'full_name' => $_SESSION['full_name'], 'role' => $_SESSION['role'], 'email' => $_SESSION['email'] ?? ''] : [];
+$trialDaysLeft = null;
+$isTrialAccount = false;
+if (loggedIn()) {
+    try {
+        $uSt = db()->prepare("SELECT account_status, trial_ends_at FROM users WHERE id=? LIMIT 1");
+        $uSt->execute([(int)$_SESSION['uid']]);
+        $uData = $uSt->fetch();
+        if ($uData) {
+            $currentUser['account_status'] = (string)($uData['account_status'] ?? 'ACTIVE');
+            $currentUser['trial_ends_at'] = $uData['trial_ends_at'] ?? null;
+            if ($currentUser['account_status'] === 'TRIAL' && !empty($currentUser['trial_ends_at'])) {
+                $isTrialAccount = true;
+                $trialSecs = strtotime((string)$currentUser['trial_ends_at']) - time();
+                $trialDaysLeft = max(0, (int)ceil($trialSecs / 86400));
+            }
+        }
+    } catch (\Throwable) {}
+}
 
 // ═══════════════════════════════════════════════════
 //  SESSION ROUTING — role-based bypass + shift-lock gate
@@ -14122,6 +14141,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
      controllable from Settings → Appearance. -->
             <div class="nav-right">
                 <button type="button" id="theme-toggle-btn" class="nav-link" style="padding:6px 9px;" title="Switch to light mode" onclick="toggleTheme()">🌙</button>
+                <?php if ($isTrialAccount): ?>
+                    <span class="trial-pill" style="display:inline-flex;align-items:center;gap:5px;background:rgba(245,158,11,0.15);color:#b45309;border:1px solid rgba(245,158,11,0.4);padding:3px 10px;border-radius:14px;font-size:0.75rem;font-weight:700;" title="Your store is on a 7-day free trial">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        7-Day Free Trial (<?= $trialDaysLeft ?> <?= $trialDaysLeft === 1 ? 'day' : 'days' ?> left)
+                    </span>
+                <?php endif; ?>
                 <span class="nav-user-name" title="<?= htmlspecialchars($currentUser['full_name']) ?>"><?= htmlspecialchars($currentUser['full_name']) ?></span>
                 <?php if ($isCashierRole): ?>
                     <!-- Cashiers have no direct Logout link — the only way out is completing
@@ -16000,6 +16025,18 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         </button>
                     </div>
                 </div>
+                <?php if ($isTrialAccount): ?>
+                <div class="trial-banner" style="background:linear-gradient(90deg, rgba(245,158,11,0.12), rgba(245,158,11,0.06));border:1.5px solid rgba(245,158,11,0.35);border-radius:10px;padding:12px 16px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <span style="font-size:1.3rem;">⏱️</span>
+                        <div>
+                            <div style="font-weight:700;color:#92400e;font-size:0.95rem;">7-Day Free Trial Active</div>
+                            <div style="font-size:0.8rem;color:#78350f;">Your store account is active under the 7-day free trial with <strong><?= $trialDaysLeft ?> <?= $trialDaysLeft === 1 ? 'day' : 'days' ?> remaining</strong> (trial ends <?= htmlspecialchars(date('M j, Y g:ia', strtotime((string)$currentUser['trial_ends_at']))) ?>).</div>
+                        </div>
+                    </div>
+                    <span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;font-weight:700;font-size:0.8rem;padding:4px 10px;border-radius:8px;">Trial Mode</span>
+                </div>
+                <?php endif; ?>
                 <!-- Stats -->
                 <div class="grid-4" style="margin-bottom:24px;">
                     <div class="stat-card orange">
