@@ -8542,6 +8542,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
     <script>
         (function() {
             var isAppPage = <?= json_encode(!$isAuthPage) ?>;
+            window.isAppPage = isAppPage;
             if (isAppPage && localStorage.getItem('pos_theme') === 'light') {
                 document.documentElement.classList.add('theme-light');
             }
@@ -16013,6 +16014,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         <p class="page-sub" id="shop-name"><?= htmlspecialchars((!empty($storeSettings['shop_name']) && $storeSettings['shop_name'] !== 'PANGGA STORE' && $storeSettings['shop_name'] !== 'PANGGA POS' && $storeSettings['shop_name'] !== 'POS SYSTEM') ? $storeSettings['shop_name'] : 'ProCast') ?></p>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="openCashDrawer(false)" title="Open Cash Drawer (Kick)" style="display:inline-flex;align-items:center;gap:4px;font-weight:600;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 12h12"/><circle cx="12" cy="16" r="1"/></svg> Drawer
+                        </button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="openHardwareModal()" title="Hardware Devices & Diagnostics" style="display:inline-flex;align-items:center;gap:4px;font-weight:600;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Devices
+                        </button>
                         <button type="button" class="btn btn-sm" onclick="openVoidOrderModal()" style="background:#C0392B;color:#fff;border:none;font-weight:700;">Void</button>
                         <button class="btn btn-primary btn-sm" onclick="openModal('cart-modal')">
                             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:2px;"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg> Cart <span id="cart-badge" style="background:#fff;color:var(--accent);border-radius:99px;padding:1px 6px;font-size:.68rem;margin-left:2px;">0</span>
@@ -16131,7 +16138,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                                     <circle cx="11" cy="11" r="8" />
                                     <line x1="21" y1="21" x2="16.65" y2="16.65" />
                                 </svg>
-                                <input type="text" class="form-input search-input" id="search-inp" placeholder="Search products…" oninput="onDashSearchInput(this)" onfocus="onDashSearchInput(this)" onblur="hideDashSearchSuggestSoon()" autocomplete="off" />
+                                <input type="text" class="form-input search-input" id="search-inp" placeholder="Search products…" oninput="onDashSearchInput(this)" onfocus="onDashSearchInput(this)" onblur="hideDashSearchSuggestSoon()" onkeydown="onDashSearchKeyDown(event)" autocomplete="off" />
                                 <div id="dash-search-suggest" class="search-suggest-dropdown" style="display:none;"></div>
                             </div>
                         </div>
@@ -16235,6 +16242,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                             </button>
                             <div class="held-carts-dropdown" id="held-carts-menu" style="display:none;"></div>
                         </div>
+                        <button type="button" class="btn btn-secondary btn-sm" style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="openCashDrawer(false)" title="Open Cash Drawer (Kick)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 12h12"/><circle cx="12" cy="16" r="1"/></svg> Drawer
+                        </button>
                         <button type="button" class="btn cart-clear-btn" style="flex:1;" onclick="clearCart()">
                             Clear Cart
                         </button>
@@ -16342,6 +16352,74 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 <button type="button" class="btn btn-success btn-full" onclick="closeDashScan();openModal('cart-modal');" style="font-size:.93rem;">
                     Pay Now — <span id="scan-cart-count">0</span> item(s) in cart
                 </button>
+            </div>
+        </div>
+        <!-- HARDWARE DEVICES & DIAGNOSTICS MODAL (Cashier & Owner accessible) -->
+        <div class="modal-overlay" id="hw-diag-modal">
+            <div class="modal" style="max-width:540px;">
+                <div class="modal-header">
+                    <span class="modal-title" style="display:flex;align-items:center;gap:7px;">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                        Hardware Devices &amp; Diagnostics
+                    </span>
+                    <button class="modal-close" onclick="closeModal('hw-diag-modal')">✕</button>
+                </div>
+                <p style="font-size:.82rem;color:var(--text3);margin-bottom:14px;">
+                    Verify and test all hardware devices: receipt printer, cash drawer, USB scanner, camera scanner, and barcode label printer.
+                </p>
+
+                <!-- Device 1: Thermal Receipt Printer -->
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+                    <div>
+                        <div style="font-size:.86rem;font-weight:700;">1. Thermal Receipt Printer</div>
+                        <div style="font-size:.74rem;color:var(--text3);">Silent ESC/POS via Native Agent (port 9100) or browser print</div>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="testPrintReceipt()">Test Print</button>
+                </div>
+
+                <!-- Device 2: Physical Cash Drawer -->
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+                    <div>
+                        <div style="font-size:.86rem;font-weight:700;">2. Cash Drawer (RJ11 Kick)</div>
+                        <div style="font-size:.74rem;color:var(--text3);">Trigger pulse via Native Agent / Web Serial / QZ</div>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="openCashDrawer(false)">Kick Drawer</button>
+                </div>
+
+                <!-- Device 3: Camera Barcode Scanner -->
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+                    <div>
+                        <div style="font-size:.86rem;font-weight:700;">3. Camera Barcode Scanner</div>
+                        <div style="font-size:.74rem;color:var(--text3);">Integrated 1D/2D reader with flashlight &amp; live beep</div>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="closeModal('hw-diag-modal');openDashScan();">Test Camera</button>
+                </div>
+
+                <!-- Device 4: Barcode Label Printer -->
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+                    <div>
+                        <div style="font-size:.86rem;font-weight:700;">4. Barcode Label Printer</div>
+                        <div style="font-size:.74rem;color:var(--text3);">Render and print high-resolution Code128 product label</div>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="testPrintBarcodeLabel()">Test Label</button>
+                </div>
+
+                <!-- Device 5: USB / Handheld Barcode Scanner -->
+                <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                        <div style="font-size:.86rem;font-weight:700;">5. USB / Handheld Barcode Scanner</div>
+                        <span id="hw-diag-lib-status" style="font-size:.72rem;font-weight:700;color:var(--text3);">Checking…</span>
+                    </div>
+                    <div style="font-size:.74rem;color:var(--text3);margin-bottom:8px;">Click inside the box below, then scan any item with your handheld USB/wireless scanner:</div>
+                    <div id="hw-diag-scanner-box" tabindex="0" style="border:1.5px dashed var(--border);border-radius:8px;padding:12px;text-align:center;font-size:.84rem;color:var(--text3);cursor:text;outline:none;background:var(--surface2);">Click here, then scan a barcode…</div>
+                    <div id="hw-diag-scanner-result" style="margin-top:8px;font-size:.78rem;"></div>
+                </div>
+
+                <div id="hw-diag-result" style="margin-top:10px;font-size:.8rem;min-height:1.2rem;"></div>
+
+                <div style="margin-top:14px;text-align:right;">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="closeModal('hw-diag-modal')">Close</button>
+                </div>
             </div>
         </div>
     <?php endif; ?>
@@ -18509,20 +18587,33 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             function receiptPrintScript() {
                 return '<script>' +
-                    'var __didPrint = false;' +
-                    'function doPrint(){' +
-                    '  if (__didPrint) return;' +
-                    '  __didPrint = true;' +
-                    '  try{ window.focus(); window.print(); }catch(e){}' +
-                    '  window.onafterprint = function(){' +
-                    '    setTimeout(function(){' +
-                    '      try{ if(window.frameElement) window.frameElement.remove(); else window.close(); }catch(e){}' +
-                    '      try{ if(window.parent && typeof window.parent.__posReceiptCallback === "function") window.parent.__posReceiptCallback(); }catch(e){}' +
-                    '    }, 400);' +
-                    '  };' +
+                    'var __didPrint=false;' +
+                    'function cleanup(){' +
+                    '  setTimeout(function(){' +
+                    '    try{ if(window.frameElement) window.frameElement.remove(); }catch(e){}' +
+                    '    try{ if(!window.frameElement) window.close(); }catch(e){}' +
+                    '    try{ if(window.parent && typeof window.parent.__posReceiptCallback==="function") window.parent.__posReceiptCallback(); }catch(e){}' +
+                    '    try{ if(window.opener && typeof window.opener.__posReceiptCallback==="function") window.opener.__posReceiptCallback(); }catch(e){}' +
+                    '  }, 450);' +
                     '}' +
-                    'if (document.readyState === "complete") { setTimeout(doPrint, 150); }' +
-                    'else { window.addEventListener("load", function(){ setTimeout(doPrint, 150); }); }' +
+                    'function doPrint(){' +
+                    '  if(__didPrint)return;' +
+                    '  __didPrint=true;' +
+                    '  try{' +
+                    '    window.focus();' +
+                    '    window.onafterprint=cleanup;' +
+                    '    window.print();' +
+                    '  }catch(e){}' +
+                    '  try{' +
+                    '    var mql=window.matchMedia("print");' +
+                    '    var _handled=false;' +
+                    '    function mqHandler(e){if(!e.matches && !_handled){_handled=true;mql.removeListener(mqHandler);cleanup();}}' +
+                    '    mql.addListener(mqHandler);' +
+                    '  }catch(e){}' +
+                    '  setTimeout(cleanup,8000);' +
+                    '}' +
+                    'if(document.readyState==="complete"){setTimeout(doPrint,120);}' +
+                    'else{window.addEventListener("load",function(){setTimeout(doPrint,120);});}' +
                     '<\/script>';
             }
 
@@ -19223,6 +19314,61 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 box.style.display = 'block';
             }
 
+            function onDashSearchKeyDown(e) {
+                if (e.key === 'Enter') {
+                    const inp = e.target;
+                    const val = (inp?.value || '').trim();
+                    if (!val) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    const scanFn = window.routeHIDScan || window.triggerHIDScan || (typeof routeHIDScan === 'function' ? routeHIDScan : null);
+
+                    // 1. Direct barcode match in local product list
+                    const prods = Array.isArray(allProds) && allProds.length ? allProds : [];
+                    const bcMatch = prods.find(p => 
+                        String(p.barcode || '').trim().toLowerCase() === val.toLowerCase() ||
+                        String(p.pack_barcode || '').trim().toLowerCase() === val.toLowerCase() ||
+                        String(p.case_barcode || '').trim().toLowerCase() === val.toLowerCase()
+                    );
+                    if (bcMatch) {
+                        inp.value = '';
+                        filterProds();
+                        hideDashSearchSuggestSoon();
+                        if (typeof scanFn === 'function') {
+                            scanFn(bcMatch.barcode || val);
+                        } else {
+                            addToCart(bcMatch.id, 1);
+                            const cartModalEl = document.getElementById('cart-modal');
+                            if (cartModalEl && !cartModalEl.classList.contains('open')) openModal('cart-modal');
+                        }
+                        return;
+                    }
+
+                    // 2. Barcode pattern (at least 3 alphanumeric/hyphen characters)
+                    if (/^[a-zA-Z0-9_\-\.]{3,}$/.test(val)) {
+                        inp.value = '';
+                        filterProds();
+                        hideDashSearchSuggestSoon();
+                        if (typeof scanFn === 'function') {
+                            scanFn(val);
+                        }
+                        return;
+                    }
+
+                    // 3. Fallback: single item search match
+                    const matches = getProductSuggestions(prods, val, 2);
+                    if (matches && matches.length === 1) {
+                        inp.value = '';
+                        filterProds();
+                        hideDashSearchSuggestSoon();
+                        addToCart(matches[0].id, 1);
+                        const cartModalEl = document.getElementById('cart-modal');
+                        if (cartModalEl && !cartModalEl.classList.contains('open')) openModal('cart-modal');
+                    }
+                }
+            }
+
             document.addEventListener('click', function(e) {
                 if (!e.target.closest('.search-wrap')) {
                     const d = document.getElementById('dash-search-suggest');
@@ -19523,7 +19669,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             function addToCart(pid, qtyOverride, explicitSource) {
                 const p = allProds.find(x => x.id == pid);
-                if (!p) return;
+                if (!p) return false;
 
                 const privileged = isOwnerOrAdmin();
                 let source = 'store';
@@ -19544,7 +19690,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 const maxStock = (source === 'warehouse') ? (parseInt(p.warehouse_quantity) || 0) : (parseInt(p.quantity) || 0);
                 if (maxStock <= 0) {
                     toast('Out of ' + (source === 'warehouse' ? 'warehouse' : 'store') + ' stock!', 'error');
-                    return;
+                    return false;
                 }
 
                 const addQty = Math.max(1, parseInt(qtyOverride) || 1);
@@ -19552,13 +19698,13 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 if (ex) {
                     if (ex.qty + addQty > maxStock) {
                         toast('Not enough ' + (source === 'warehouse' ? 'warehouse' : 'store') + ' stock! (Max: ' + maxStock + ')', 'warning');
-                        return;
+                        return false;
                     }
                     ex.qty += addQty;
                 } else {
                     if (addQty > maxStock) {
                         toast('Not enough ' + (source === 'warehouse' ? 'warehouse' : 'store') + ' stock! (Max: ' + maxStock + ')', 'warning');
-                        return;
+                        return false;
                     }
                     // Price chain per line item:
                     //   regular_price  → the shelf/catalog price, always kept as reference
@@ -19617,6 +19763,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         setTimeout(() => focusCartCashTendered(false), 50);
                     }
                 }
+                return true;
             }
 
             function removeFromCart(pid, stockSource) {
@@ -20358,49 +20505,73 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             // Universal high-reliability thermal receipt printer engine:
             // Creates a fresh, clean isolated browsing context per print job to prevent Chromium iframe caching/freeze.
-            // Works seamlessly across Windows 11 Chrome, standalone Desktop PWA, and Kiosk silent printing.
-            function executeUniversalReceiptPrint(fullReceiptHtml) {
+            window.__posReceiptCallback = function() {
                 try {
-                    const oldFrame = document.getElementById('receipt-print-frame');
-                    if (oldFrame) {
-                        try { oldFrame.remove(); } catch(e) {}
-                    }
+                    dismissSuccessModal();
+                } catch (e) {}
+            };
 
+            function openReceiptPrintPopup(fullReceiptHtml) {
+                try {
+                    const pw = window.open('', '_blank', 'width=380,height=640,toolbar=0,scrollbars=1,status=0,menubar=0,location=0');
+                    if (pw) {
+                        pw.document.open();
+                        pw.document.write(fullReceiptHtml);
+                        pw.document.close();
+                        setTimeout(() => {
+                            try {
+                                pw.focus();
+                                pw.print();
+                            } catch(e) {}
+                        }, 250);
+                        return true;
+                    }
+                } catch (e) {
+                    console.warn('[POS Print] Popup blocked:', e);
+                }
+                return false;
+            }
+
+            function executeUniversalReceiptPrint(fullReceiptHtml) {
+                const oldFrame = document.getElementById('receipt-print-frame');
+                if (oldFrame) { try { oldFrame.remove(); } catch(e) {} }
+
+                try {
                     const printFrame = document.createElement('iframe');
                     printFrame.id = 'receipt-print-frame';
-                    // 300px off-screen layout gives Chromium exact thermal receipt proportions (58mm/80mm) without visual flicker
-                    printFrame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:300px;height:600px;border:0;opacity:0;pointer-events:none;z-index:-9999;';
+                    // Must be rendered in the document tree with dimensions for Chromium to execute print()
+                    printFrame.style.cssText = 'position:fixed;bottom:0;right:0;width:320px;height:240px;border:none;visibility:hidden;z-index:-1;';
                     document.body.appendChild(printFrame);
 
                     const frameDoc = printFrame.contentDocument || printFrame.contentWindow?.document;
-                    if (!frameDoc) throw new Error('Cannot access print frame document');
+                    if (frameDoc) {
+                        frameDoc.open();
+                        frameDoc.write(fullReceiptHtml);
+                        frameDoc.close();
 
-                    frameDoc.open();
-                    frameDoc.write(fullReceiptHtml);
-                    frameDoc.close();
-
-                    // Coordinated safety trigger: ensures printing fires reliably in Windows 11 Chrome and installed desktop PWA
-                    setTimeout(() => {
-                        try {
-                            if (printFrame.contentWindow && !printFrame.contentWindow.__didPrint) {
-                                printFrame.contentWindow.focus();
-                                printFrame.contentWindow.print();
+                        setTimeout(() => {
+                            try {
+                                const fw = printFrame.contentWindow;
+                                if (fw) {
+                                    fw.focus();
+                                    fw.print();
+                                }
+                            } catch (e) {
+                                console.warn('[POS Print] iframe print failed, falling back to popup:', e);
+                                openReceiptPrintPopup(fullReceiptHtml);
                             }
-                        } catch (e) {
-                            console.warn('Iframe print direct trigger notice:', e);
-                        }
-                    }, 350);
-                } catch (e) {
-                    // Fallback to popup window if iframe creation was blocked
-                    try {
-                        const win = window.open('', '_blank', 'width=380,height=650');
-                        if (win) {
-                            win.document.write(fullReceiptHtml);
-                            win.document.close();
-                        }
-                    } catch (popErr) {
-                        console.error('All receipt printing mechanisms failed:', popErr);
+                            setTimeout(() => { try { printFrame.remove(); } catch(e) {} }, 10000);
+                        }, 280);
+                        return;
                     }
+                } catch (e) {
+                    console.warn('[POS Print] iframe setup failed:', e);
+                }
+
+                // Popup fallback
+                const popSuccess = openReceiptPrintPopup(fullReceiptHtml);
+                if (!popSuccess) {
+                    toast('Printer: Please allow popups for automatic receipt printing', 'warning');
                 }
             }
 
@@ -23249,8 +23420,30 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                             hwDiagResult('Could not open the drawer via QZ Tray: ' + reason, false);
                         }
                     }
-                } else if (!silent) {
-                    hwDiagResult('Could not kick cash drawer: Native Print Agent (port 9100) is not reachable. Ensure start-print-agent-silent.vbs is running, or launch via START-POS-ONLINE.bat / SETUP-CASHDRAWER-WINDOWS.bat.', false);
+                }
+
+                // 3. Try Web Serial API fallback if available (USB-to-Serial / direct COM triggers)
+                if (navigator.serial) {
+                    try {
+                        const ports = await navigator.serial.getPorts();
+                        if (ports && ports.length > 0) {
+                            const port = ports[0];
+                            await port.open({ baudRate: 9600 });
+                            const writer = port.writable.getWriter();
+                            const encoder = new TextEncoder();
+                            await writer.write(encoder.encode(DRAWER_KICK_ESCPOS));
+                            writer.releaseLock();
+                            await port.close();
+                            if (!silent) hwDiagResult('Cash drawer kicked via Web Serial port!', true);
+                            return true;
+                        }
+                    } catch (serErr) {
+                        console.warn('Web Serial kick:', serErr);
+                    }
+                }
+
+                if (!silent) {
+                    hwDiagResult('Could not kick cash drawer: Native Print Agent (port 9100) is not reachable, and no QZ printer is configured.', false);
                 }
                 return false;
             }
@@ -25042,7 +25235,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                             if (res && res.text) {
                                 const code = res.text.trim();
                                 const now = Date.now();
-                                const isVerified = (res.engine === 'native' || res.engine === 'jsqr');
+                                const isVerified = (res.engine === 'native' || res.engine === 'jsqr' || (res.engine === 'zxing' && code.length >= 3));
                                 const isMatch = (code === _lastSeenCode && (now - _lastSeenTime) < 1000);
                                 _lastSeenCode = code;
                                 _lastSeenTime = now;
@@ -27837,7 +28030,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     let _autoSubmitTimer = null;
                     let _burstTargetInput = null;
                     let _burstPreValue = '';
-                    const HID_SPEED_MS = 75; // relaxed to 75ms for Bluetooth LE & wireless dongles
+                    const HID_SPEED_MS = 120; // relaxed to 120ms for Bluetooth LE, USB HID, & wireless dongles
                     const HID_MIN_LEN = 3; // minimum barcode length to accept
 
                     window._isScannerBurstActive = false;
@@ -27866,17 +28059,15 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     // Intercept in the CAPTURE phase on window so scanner events run BEFORE
                     // any document/element listeners, especially initCartKeyboardNav!
                     window.addEventListener('keydown', function(e) {
-                        // Auth pages (login, signup, forgot, reset, landing) have no
+                        // Auth pages (login, signup, forgot, reset, landing, activate) have no
                         // barcode-scanner context. Bail out immediately so the burst
-                        // detector never misinterprets fast typing — e.g. holding Shift
-                        // for uppercase while filling in the Sign-Up form — as a scanner
-                        // scan, which would accumulate the keystrokes in the buffer and
-                        // route them into routeHIDScan(), ultimately toasting a confusing
-                        // "Product not found" error and suppressing character input.
-                        if (!isAppPage) return;
+                        // detector never misinterprets fast typing.
+                        const isApp = (typeof window.isAppPage !== 'undefined' ? window.isAppPage : (typeof isAppPage !== 'undefined' ? isAppPage : (typeof cur_page !== 'undefined' && !['login', 'signup', 'forgot', 'reset', 'landing', 'activate'].includes(cur_page))));
+                        if (!isApp) return;
                         const now = Date.now();
                         const active = document.activeElement;
                         const inCartOrQty = !!(active && (active.id === 'cash-input' || active.classList?.contains('cart-qty-input')));
+                        const inSearchInp = !!(active && active.id === 'search-inp');
                         const isEditable = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable);
 
                         const fast = (now - _lastKey) < HID_SPEED_MS;
@@ -27895,7 +28086,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         if (e.key === 'Enter' || e.key === 'Tab') {
                             clearTimeout(_autoSubmitTimer);
                             const code = _buf.trim();
-                            const wasScanner = looksLikeScanner || _fastStreak >= 1 || (code.length >= HID_MIN_LEN && (now - _firstKeyTime) < (code.length * 70));
+                            const wasScanner = looksLikeScanner || _fastStreak >= 1 || (code.length >= HID_MIN_LEN && (now - _firstKeyTime) < (code.length * 130));
 
                             if (wasScanner && code.length >= HID_MIN_LEN) {
                                 // CRITICAL: Stop propagation so initCartKeyboardNav NEVER gets this Enter!
@@ -27903,11 +28094,14 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                                 e.stopPropagation();
                                 e.stopImmediatePropagation();
 
-                                // If characters leaked into Cash Tendered or Qty during the first 1-2 keys, restore clean value
+                                // If characters leaked into Cash Tendered, Qty, or Search bar, restore clean value
                                 if (_burstTargetInput) {
                                     _burstTargetInput.value = _burstPreValue;
                                     if (_burstTargetInput.id === 'cash-input' && typeof calcChange === 'function') {
                                         calcChange();
+                                    } else if (_burstTargetInput.id === 'search-inp' && typeof filterProds === 'function') {
+                                        filterProds();
+                                        hideDashSearchSuggestSoon();
                                     }
                                 }
 
@@ -27976,7 +28170,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                                         _burstTargetInput = null;
                                         routeHIDScan(code);
                                     }
-                                }, 85);
+                                }, 110);
                             }
                         } else if (e.key !== 'Shift') {
                             clearTimeout(_autoSubmitTimer);
@@ -28108,6 +28302,36 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         }
 
                         // 5. Default ── add to cart (works on dashboard from anywhere, and continuously in cart)
+                        function handleAddProductToCart(p) {
+                            if (!allProds.find(x => x.id == p.id)) allProds.push(p);
+                            const addQty = typeof scanUnitQty === 'function' ? scanUnitQty(p) : 1;
+                            const ex = cart.find(c => c.product_id === p.id && (c.stock_source || 'store') === 'store');
+                            const addSuccess = addToCart(p.id, addQty);
+                            if (addSuccess !== false) {
+                                if (typeof updateScanCartCount === 'function') updateScanCartCount();
+                                if (typeof playScanBeep === 'function') playScanBeep();
+                                const finalQty = ex ? ex.qty : addQty;
+                                toast(p.name + ' ×' + finalQty + ' in cart', 'success');
+                                const cartModalEl = document.getElementById('cart-modal');
+                                if (cartModalEl && !cartModalEl.classList.contains('open')) {
+                                    openModal('cart-modal');
+                                }
+                            }
+                        }
+
+                        // Try local in-memory products FIRST for instant zero-latency response!
+                        const cleanBc = barcode.trim().toLowerCase();
+                        const localP = (Array.isArray(allProds) ? allProds : []).find(x => 
+                            String(x.barcode || '').trim().toLowerCase() === cleanBc ||
+                            String(x.pack_barcode || '').trim().toLowerCase() === cleanBc ||
+                            String(x.case_barcode || '').trim().toLowerCase() === cleanBc
+                        );
+                        if (localP) {
+                            handleAddProductToCart(localP);
+                            return;
+                        }
+
+                        // Otherwise query server
                         apiGet('get_product_by_barcode', {
                             barcode
                         }).then(r => {
@@ -28115,24 +28339,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                                 toast('Product not found: ' + barcode, 'error');
                                 return;
                             }
-                            const p = r.data;
-                            if (!allProds.find(x => x.id == p.id)) allProds.push(p);
-                            const wasEmpty = cart.length === 0;
-                            const addQty = scanUnitQty(p);
-                            const ex = cart.find(c => c.product_id === p.id && (c.stock_source || 'store') === 'store');
-                            addToCart(p.id, addQty);
-                            updateScanCartCount();
-                            playScanBeep();
-                            const finalQty = ex ? ex.qty : addQty;
-                            toast(p.name + ' ×' + finalQty + ' in cart', 'success');
-                            if (wasEmpty) {
-                                const cartModalEl = document.getElementById('cart-modal');
-                                if (cartModalEl && !cartModalEl.classList.contains('open')) openModal('cart-modal');
-                            }
+                            handleAddProductToCart(r.data);
                         });
                     }
 
                     // Expose so other code can trigger a scan programmatically if needed
+                    window.routeHIDScan = routeHIDScan;
                     window.triggerHIDScan = routeHIDScan;
                 })();
 

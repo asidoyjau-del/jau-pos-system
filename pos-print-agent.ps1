@@ -7,7 +7,7 @@
 
 param(
     [int]$Port = 9100,
-    [string]$PrinterName = "Xprinter XP-58"
+    [string]$PrinterName = "POS-58"
 )
 
 $ErrorActionPreference = 'Continue'
@@ -121,7 +121,7 @@ $script:DRAWER_PULSE = [byte[]]@(
 # "Microsoft Print to PDF" (opens a Save dialog) or XPS writer causes garbage
 # pages or pop-ups. If no thermal printer is installed we use TEST MODE instead.
 $script:THERMAL_KEYWORDS = @(
-    'XP-58', 'XP-80', 'XP58', 'XP80', 'Xprinter', 'POS-58', 'POS-80', 'POS58', 'POS80',
+    'POS-58', 'XP-58', 'XP-80', 'XP58', 'XP80', 'Xprinter', 'POS-80', 'POS58', 'POS80',
     'Thermal', 'Receipt', 'TM-T', 'TM-U', 'RP58', 'RP80', 'GP-58', 'GP-80', 'ZJ-58', 'ZJ-80',
     'EPSON TM', 'Rongta', 'HPRT', 'Sewoo', 'Bixolon', 'SRP-', 'Star TSP', 'TSP1', 'Goojprt', 'MTP-'
 )
@@ -139,14 +139,52 @@ function Get-InstalledPrinterNames {
     return $names
 }
 
+# Verifies printer is not in a deleting, errored, or stuck state
+function Test-PrinterResponsive {
+    param([string]$Name)
+    if (-not $Name) { return $false }
+    try {
+        $p = Get-Printer -Name $Name -ErrorAction SilentlyContinue
+        if (-not $p) { return $false }
+        $st = "$($p.PrinterStatus)"
+        if ($st -like "*Deleting*" -or $st -like "*Error*") { return $false }
+        return $true
+    } catch { return $true }
+}
+
 # Helper to find the thermal printer. Returns $null when none is installed.
 function Get-TargetPrinterName {
     param([string]$Preferred)
     $installed = Get-InstalledPrinterNames
+
+    # 1. Preferred printer if installed and responsive
     if ($Preferred) {
-        foreach ($p in $installed) { if ($p -eq $Preferred) { return $p } }
-        foreach ($p in $installed) { if ($p -like "*$Preferred*") { return $p } }
+        foreach ($p in $installed) {
+            if ($p -eq $Preferred -and (Test-PrinterResponsive -Name $p)) { return $p }
+        }
+        foreach ($p in $installed) {
+            if ($p -like "*$Preferred*" -and (Test-PrinterResponsive -Name $p)) { return $p }
+        }
     }
+
+    # 2. Check Windows Default Printer if it matches any thermal keyword and is responsive
+    try {
+        $def = (Get-CimInstance Win32_Printer -Filter "Default = True" -ErrorAction SilentlyContinue).Name
+        if ($def) {
+            foreach ($kw in $script:THERMAL_KEYWORDS) {
+                if ($def -like "*$kw*" -and (Test-PrinterResponsive -Name $def)) { return $def }
+            }
+        }
+    } catch {}
+
+    # 3. Check thermal keywords in priority order for responsive printers
+    foreach ($kw in $script:THERMAL_KEYWORDS) {
+        foreach ($p in $installed) {
+            if ($p -like "*$kw*" -and (Test-PrinterResponsive -Name $p)) { return $p }
+        }
+    }
+
+    # 4. Fallback: any installed thermal printer name
     foreach ($kw in $script:THERMAL_KEYWORDS) {
         foreach ($p in $installed) { if ($p -like "*$kw*") { return $p } }
     }
@@ -239,7 +277,7 @@ function Send-PosJob {
         Write-Host "[TEST MODE] No thermal printer installed - preview saved: $file" -ForegroundColor Magenta
         return @{ success = $true; mode = 'simulated'; printer = $null; preview_file = $file }
     }
-    $stage = [RawPrinterHelper]::SendBytesToPrinterEx($target, $Bytes, 2500)
+    $stage = [RawPrinterHelper]::SendBytesToPrinterEx($target, $Bytes, 3000)
     if ($stage -ge 4) { return @{ success = $true; mode = 'printed'; printer = $target } }
     # Stage 1 = printer opened but StartDocPrinter is still blocking (USB unplugged);
     # Windows still queues the job, so it is not a real failure.
@@ -247,6 +285,24 @@ function Send-PosJob {
         Write-Host "[QUEUED] Job is in the Windows spooler for $target (printer offline/unplugged?)" -ForegroundColor Yellow
         return @{ success = $true; mode = 'queued'; printer = $target }
     }
+
+    # If chosen printer failed, immediately attempt fallback to another installed thermal printer!
+    $allInstalled = Get-InstalledPrinterNames
+    foreach ($alt in $allInstalled) {
+        if ($alt -ne $target -and (Test-PrinterResponsive -Name $alt)) {
+            $isThermal = $false
+            foreach ($kw in $script:THERMAL_KEYWORDS) { if ($alt -like "*$kw*") { $isThermal = $true; break } }
+            if ($isThermal) {
+                Write-Host "[RETRY] Attempting fallback printer: $alt" -ForegroundColor Yellow
+                $stageAlt = [RawPrinterHelper]::SendBytesToPrinterEx($alt, $Bytes, 3000)
+                if ($stageAlt -ge 1) {
+                    $script:actualPrinter = $alt
+                    return @{ success = $true; mode = (if ($stageAlt -ge 4) { 'printed' } else { 'queued' }); printer = $alt }
+                }
+            }
+        }
+    }
+
     # Could not even open the printer (driver removed / spooler stopped): save preview so nothing is lost
     $file = Save-ReceiptPreview -Bytes $Bytes -Kind $Kind -Ref $Ref
     Write-Host "[FAILED] Could not open printer $target (stage $stage). Preview saved: $file" -ForegroundColor Red
@@ -776,11 +832,14 @@ while ($listener.IsListening) {
 
         # Enable complete CORS & Private Network Access for POS app (works for localhost and cloud https://pos-system-9f0n.onrender.com)
         $origin = $req.Headers["Origin"]
-        if (-not $origin) { $origin = "*" }
-        $res.AddHeader("Access-Control-Allow-Origin", $origin)
+        if ($origin) {
+            $res.AddHeader("Access-Control-Allow-Origin", $origin)
+            $res.AddHeader("Access-Control-Allow-Credentials", "true")
+        } else {
+            $res.AddHeader("Access-Control-Allow-Origin", "*")
+        }
         $res.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        $res.AddHeader("Access-Control-Allow-Headers", "Content-Type, X-Requested-With, Origin, Accept")
-        $res.AddHeader("Access-Control-Allow-Credentials", "true")
+        $res.AddHeader("Access-Control-Allow-Headers", "Content-Type, X-Requested-With, Origin, Accept, Access-Control-Request-Private-Network")
         $res.AddHeader("Access-Control-Allow-Private-Network", "true")
 
         if ($req.HttpMethod -eq "OPTIONS") {
