@@ -1,0 +1,1184 @@
+<?php
+declare(strict_types=1);
+
+namespace ProCast\Controllers\PlatformAdmin;
+
+use PDO;
+use ProCast\Support\Audit;
+use ProCast\Support\Crypto;
+use ProCast\Support\Csrf;
+use ProCast\Support\Env;
+use ProCast\Support\HealthCheck;
+use ProCast\Support\Mailer;
+use ProCast\Support\Request;
+use ProCast\Support\Response;
+use ProCast\Support\StoreRepository;
+use ProCast\Support\View;
+
+/**
+ * Store approval queue, store lifecycle actions, global monitoring and the
+ * user activity inspector. Reached only through the Kernel AFTER the guard
+ * has validated session, CSRF (for POST) and admin status.
+ */
+final class SuperAdminDashboardController
+{
+    private const TIERS = ['free', 'standard', 'pro'];
+
+    public function __construct(private PDO $db, private StoreRepository $stores)
+    {
+    }
+
+    // ── Monitoring ────────────────────────────────────────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function monitoring(Request $req, array &$session, array $admin, int $now): Response
+    {
+        $scope   = $this->monitoringScope($req);
+        $store   = $scope['store'];
+        $storeId = $store === null ? null : (int)$store['id'];
+
+        // A named-but-unknown store id is refused outright. Answering it with the
+        // platform roll-up would put every tenant's revenue under a URL that still
+        // claims to be one store, and the page would look entirely normal.
+        if ($scope['invalid']) {
+            return Response::notFound();
+        }
+
+        // counts() is deliberately NOT scoped. It is the platform's store-lifecycle
+        // census (how many are pending/suspended) and has no meaning per-tenant;
+        // hiding the queue while looking at one store would be actively misleading.
+        // Everything that is a TRADING metric -- sessions, volume, analytics -- is
+        // computed from the selected store's own rows.
+        return $this->page('monitoring', $session, $admin,
+            $store === null ? 'Global monitoring' : 'Monitoring — ' . (string)($store['display_name'] ?: $store['name']),
+            'monitoring', [
+            'counts'   => $this->stores->counts(),
+            'sessions' => $this->stores->activeSessions($now, $storeId),
+            'volume'   => $this->stores->volume($now, $storeId),
+            'analytics'=> $this->stores->analytics($now, 14, $storeId),
+            'store'    => $store,
+            'storeId'  => $storeId,
+            'stores'   => $store === null ? $this->stores->list(null, '', 200) : [],
+            'now'      => $now,
+        ]);
+    }
+
+    // ── Analytics ──────────────────────────────────────────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function analyticsPage(Request $req, array &$session, array $admin, int $now): Response
+    {
+        $scope   = $this->resolveStoreScope($req);
+        $store   = $scope['store'];
+        $storeId = $store === null ? null : (int)$store['id'];
+
+        if ($scope['invalid'] === true) {
+            return Response::notFound();
+        }
+
+        $rawDays = (int)($req->queryStr('days') ?: 14);
+        $days = in_array($rawDays, [7, 14, 30, 60, 90], true) ? $rawDays : 14;
+
+        return $this->page('analytics', $session, $admin,
+            $store === null ? 'Platform Analytics' : 'Analytics — ' . (string)($store['display_name'] ?: $store['name']),
+            'analytics', [
+            'counts'    => $this->stores->counts(),
+            'sessions'  => $this->stores->activeSessions($now, $storeId),
+            'volume'    => $this->stores->volume($now, $storeId),
+            'analytics' => $this->stores->analytics($now, $days, $storeId),
+            'store'     => $store,
+            'storeId'   => $storeId,
+            'stores'    => $this->stores->list(null, '', 200),
+            'days'      => $days,
+            'now'       => $now,
+        ]);
+    }
+
+    private function resolveStoreScope(Request $req): array
+    {
+        $raw = trim((string)$req->queryStr('store'));
+        if ($raw === '' || !ctype_digit($raw)) {
+            return ['store' => null, 'invalid' => false];
+        }
+        $store = $this->stores->find((int)$raw);
+        return ['store' => $store, 'invalid' => $store === null];
+    }
+
+    /**
+     * Resolves the ?store= monitoring filter to a real, existing store row.
+     *
+     * Three outcomes, deliberately kept distinct:
+     *   store null, invalid false -> "All stores" was asked for.
+     *   store row, invalid false  -> a real store was named.
+     *   store null, invalid true  -> a numeric id was named that does NOT resolve.
+     *
+     * The third case must never degrade into the first. Silently falling back to
+     * the platform roll-up on a stale or mistyped id is the dangerous outcome:
+     * the admin would see every tenant's revenue on a page whose URL still says
+     * they were looking at one store, with nothing to signal the mismatch. So an
+     * unresolvable id is rejected (404) rather than answered.
+     *
+     * @return array{store:array<string,mixed>|null,invalid:bool}
+     */
+    private function monitoringScope(Request $req): array
+    {
+        $raw = trim((string)$req->queryStr('store'));
+        if ($raw === '' || !ctype_digit($raw)) {
+            // Non-numeric input is the selector's own "All stores" option (value=""),
+            // not a bad reference, so it is a legitimate platform-wide request.
+            return ['store' => null, 'invalid' => false];
+        }
+        $store = $this->stores->find((int)$raw);
+        return ['store' => $store, 'invalid' => $store === null];
+    }
+
+    /**
+     * Live counters for the polling widget.
+     *
+     * Deliberately does NOT include analytics(): the trend/top-store queries scan
+     * the whole window and this endpoint is hit on a short interval, so folding
+     * them in here would turn a status poll into a reporting query.
+     *
+     * Accepts the same ?store= scope as the page it backs. The poll MUST honour
+     * it: a status widget that refreshed "Today's revenue" with platform totals
+     * while the page beside it showed one store would mean the two disagree in
+     * real time, and the poll would overwrite the correct figure every 30s.
+     */
+    public function telemetry(Request $req, int $now): Response
+    {
+        $scope   = $this->monitoringScope($req);
+        $store   = $scope['store'];
+        $storeId = $store === null ? null : (int)$store['id'];
+
+        // Same rule as the page it backs: an unresolvable scope gets an error, not
+        // a platform-wide payload. admin.js already skips non-OK responses, so a
+        // dead id leaves the last good figures on screen instead of painting
+        // every tenant's totals into a single store's tiles.
+        if ($scope['invalid']) {
+            return Response::json(['error' => 'unknown_store', 'store_id' => null], 404);
+        }
+
+        return Response::json([
+            'counts'   => $this->stores->counts(),
+            'sessions' => $this->stores->activeSessions($now, $storeId),
+            'volume'   => $this->stores->volume($now, $storeId),
+            'at'       => gmdate('c', $now),
+            // Echoed so admin.js can tell a scoped widget from a platform one
+            // rather than trusting whatever id the page URL happens to carry.
+            'store_id' => $storeId,
+        ]);
+    }
+
+    public function health(): Response
+    {
+        return Response::json(HealthCheck::forecastingEngine());
+    }
+
+    // ── Store queue / detail ──────────────────────────────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function stores(Request $req, array &$session, array $admin): Response
+    {
+        // Default to the "All" tab rather than the pending queue. A super admin
+        // opening /platform-admin/stores wants to see every application at
+        // once; landing on a filtered view made active stores look missing.
+        // An absent or unrecognised ?status= also falls back to All instead of
+        // silently hiding everything that is not pending.
+        $status = $req->queryStr('status', 'all');
+        $filter = $status === 'all' ? null : (in_array($status, StoreRepository::STATUSES, true) ? $status : null);
+        $q = $req->queryStr('q');
+
+        // Tag every store row so the view can distinguish them from staff rows.
+        $storeRows = $this->stores->list($filter, $q);
+        foreach ($storeRows as &$sr) {
+            $sr['entry_type'] = 'store';
+        }
+        unset($sr);
+
+        // Merge pending/rejected staff accounts directly into the same table so
+        // the super admin can approve or reject them without leaving this page.
+        if ($filter === 'pending_approval' || $filter === null) {
+            $pendingStaff = $this->stores->pendingStaffAccounts($q, 100);
+            foreach ($pendingStaff as $ps) {
+                $storeRows[] = [
+                    'entry_type'        => 'staff',
+                    'id'                => (int)$ps['id'],
+                    'name'              => $ps['full_name'] ?: $ps['username'],
+                    'display_name'      => $ps['full_name'] ?: $ps['username'],
+                    'display_owner'     => $ps['owner_name'] ?? '—',
+                    'display_email'     => $ps['email'] ?? '',
+                    'contact_phone'     => '',
+                    'client_type'       => null,
+                    'status'            => 'pending_approval',
+                    'subscription_tier' => $ps['role'] ?? 'staff',
+                    'registered_at'     => $ps['created_at'] ?? '',
+                    'created_at'        => $ps['created_at'] ?? '',
+                    // Staff-specific fields for the view
+                    'username'          => $ps['username'],
+                    'full_name'         => $ps['full_name'] ?? '',
+                    'role'              => $ps['role'] ?? 'staff',
+                    'email'             => $ps['email'] ?? '',
+                    'store_id'          => $ps['store_id'] ?? null,
+                    'store_name'        => $ps['store_name'] ?? '',
+                    'display_store_name'=> $ps['display_store_name'] ?? $ps['store_name'] ?? '',
+                    'owner_name'        => $ps['owner_name'] ?? '',
+                    'owner_email'       => $ps['owner_email'] ?? '',
+                    'account_status'    => $ps['account_status'] ?? 'PENDING',
+                ];
+            }
+        }
+        if ($filter === 'rejected' || $filter === null) {
+            $rejectedStaff = $this->stores->rejectedStaffAccounts($q, 100);
+            foreach ($rejectedStaff as $rs) {
+                $storeRows[] = [
+                    'entry_type'        => 'staff',
+                    'id'                => (int)$rs['id'],
+                    'name'              => $rs['full_name'] ?: $rs['username'],
+                    'display_name'      => $rs['full_name'] ?: $rs['username'],
+                    'display_owner'     => $rs['owner_name'] ?? '—',
+                    'display_email'     => $rs['email'] ?? '',
+                    'contact_phone'     => '',
+                    'client_type'       => null,
+                    'status'            => 'rejected',
+                    'subscription_tier' => $rs['role'] ?? 'staff',
+                    'registered_at'     => $rs['created_at'] ?? '',
+                    'created_at'        => $rs['created_at'] ?? '',
+                    'username'          => $rs['username'],
+                    'full_name'         => $rs['full_name'] ?? '',
+                    'role'              => $rs['role'] ?? 'staff',
+                    'email'             => $rs['email'] ?? '',
+                    'store_id'          => $rs['store_id'] ?? null,
+                    'store_name'        => $rs['store_name'] ?? '',
+                    'display_store_name'=> $rs['display_store_name'] ?? $rs['store_name'] ?? '',
+                    'owner_name'        => $rs['owner_name'] ?? '',
+                    'owner_email'       => $rs['owner_email'] ?? '',
+                    'account_status'    => $rs['account_status'] ?? 'REJECTED',
+                    'rejection_reason'  => $rs['rejection_reason'] ?? '',
+                ];
+            }
+        }
+
+        return $this->page('stores', $session, $admin, 'Store applications', 'stores', [
+            'rows' => $storeRows,
+            'status' => $filter ?? 'all',
+            'q' => mb_substr($q, 0, 100),
+            'counts' => $this->stores->counts(),
+        ]);
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function storeDetail(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $pairings     = $this->stores->pairingsFor($storeId, gmdate('Y-m-d H:i:s'));
+        $liveCodeText = $this->liveCodeText($pairings);
+
+        return $this->page('store_detail', $session, $admin, (string)$store['name'], 'stores', [
+            'store'     => $store,
+            'pairings'  => $pairings,
+            // The key MUST be 'liveCodeText' — that is the name store_detail.php
+            // reads (see its @var on line 4). This used to be 'liveCode', and
+            // because View::include() binds with extract(EXTR_SKIP) while the
+            // view guards with `?? ''`, the mismatch failed SILENTLY: the
+            // decrypted digits never reached the template, so the card showed
+            // "it cannot be re-shown" and every Code cell showed "Code issued —
+            // use Copy code" even though the ciphertext was right there and
+            // perfectly decryptable. Keying off the view's own variable name
+            // keeps the two ends from drifting apart again.
+            'liveCodeText' => $liveCodeText,
+            'userCount' => $this->stores->userCount($storeId),
+            'team'      => $this->teamRows($this->stores->usersOfStore($storeId)),
+        ]);
+    }
+
+    /**
+     * The plaintext of a store's live whole-store code, or null when it cannot
+     * be recovered.
+     *
+     * Rendered straight onto the detail card so the digits stay put instead of
+     * appearing only in a one-shot banner at the top of the page. The admin was
+     * losing codes simply because the page was scrolled elsewhere when the
+     * flash rendered — and re-copying still worked, so there was no reason to
+     * make them hunt for it. Reading the value here is the same audited,
+     * still-unused, unexpired code the reveal endpoint hands out.
+     */
+    private function liveCodeText(array $pairings): ?string
+    {
+        $cipher = (string)($pairings[0]['code_cipher'] ?? '');
+        if ($cipher === '') {
+            return null;
+        }
+        try {
+            return Crypto::decrypt($cipher);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Decrypts each account's live code so the team table can show the digits
+     * inline, and adds the role each code was minted for.
+     *
+     * The same reasoning as liveCodeText() applies per row: email is a
+     * convenience, but the super admin is the only dependable fallback when it
+     * is filtered, delayed, or simply not sent because the account has no
+     * address. A Code cell that can only read "issued" makes the admin revoke
+     * and re-mint a perfectly good code instead of reading it off the page.
+     *
+     * Decryption is per row and best-effort: one undecryptable code must not
+     * blank the whole table, so a failure just leaves that cell empty and the
+     * "Copy code" button remains the path of last resort.
+     *
+     * @param list<array<string,mixed>> $rows
+     * @return list<array<string,mixed>>
+     */
+    private function teamRows(array $rows): array
+    {
+        foreach ($rows as &$row) {
+            // The code's minted role is authoritative for how to LABEL it. The
+            // account's current role can differ after a promotion, and that is
+            // exactly the case the label exists to make visible.
+            $row['pairing_role_name'] = trim((string)($row['pairing_role'] ?? ''))
+                ?: trim((string)($row['role'] ?? ''));
+            $row['pairing_code'] = $this->liveCodeText([['code_cipher' => $row['pairing_code_cipher'] ?? null]]);
+        }
+        unset($row);
+        return $rows;
+    }
+
+    /** How the store runs ProCast: browser, installed PWA, or offline install. */
+    public function setClientType(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $type = trim($req->input('client_type'));
+        if (!$this->stores->setClientType($storeId, $type)) {
+            return $this->flashBack($session, $storeId, 'error', 'Unknown client type.');
+        }
+        Audit::log($this->db, (int)$admin['id'], Audit::STORE_CLIENT_SET, $storeId, $req->ip, $req->userAgent, ['client_type' => $type]);
+        return $this->flashBack($session, $storeId, 'success', 'Client type set to "' . $type . '".');
+    }
+
+    /**
+     * IRREVERSIBLE hard delete. Requires the exact store name typed back plus a
+     * reason, so it cannot be triggered by a stray click or a CSRF-shaped POST.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function destroy(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        if (!$this->confirmed($req, (string)$store['name'])) {
+            return $this->flashBack($session, $storeId, 'error', 'Type the exact store name to confirm the deletion.');
+        }
+        // The reason is OPTIONAL. It used to be mandatory (10-500 chars), which
+        // coupled the irreversible delete to a textarea that the UI no longer
+        // shows: any client that did not render that field could never delete.
+        // The typed store name below is the real authorisation; when no reason
+        // is supplied we record an explicit "not given" so the audit trail never
+        // contains a silent blank.
+        $reason = trim($req->input('reason'));
+        if ($reason !== '' && (mb_strlen($reason) < 10 || mb_strlen($reason) > 500)) {
+            return $this->flashBack($session, $storeId, 'error', 'A reason must be 10-500 characters, or left blank.');
+        }
+        if ($reason === '') {
+            $reason = 'Not given';
+        }
+
+        $userCount = $this->stores->userCount($storeId);
+
+        $this->db->beginTransaction();
+        try {
+            // Tombstone first: if the deletes below fail, the whole thing rolls
+            // back and we never end up with a deleted store and no record of it.
+            $this->stores->recordDeletion($storeId, $store, $userCount, (int)$admin['id'], $reason);
+            $result = $this->stores->destroy($storeId);
+            if (!$result['ok']) {
+                throw new \RuntimeException('Store row was not removed.');
+            }
+            Audit::log($this->db, (int)$admin['id'], Audit::STORE_DELETED, null, $req->ip, $req->userAgent, [
+                'store_id'   => $storeId,
+                'name'       => $store['name'],
+                'reason'     => $reason,
+                'cascaded'   => $result['deleted'],
+            ]);
+            $this->db->commit();
+        } catch (\Throwable $t) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            return $this->flashBack($session, $storeId, 'error', 'Delete failed and was rolled back: ' . $t->getMessage());
+        }
+
+        unset($session['sa_flash'], $session['sa_flash_secret']);
+        $session['sa_flash'] = ['type' => 'success', 'msg' => sprintf(
+            'Permanently deleted "%s" along with %d user(s) and %d login token(s). This cannot be undone.',
+            (string)$store['name'],
+            $result['deleted']['users'],
+            $result['deleted']['auth_tokens']
+        )];
+        return Response::redirect('/stores');
+    }
+
+    /**
+     * Issues a 6-digit code the store types into its OFFLINE POS to activate it.
+     * Emailed to the owner AND shown once on screen (in case email is filtered).
+     * Only the SHA-256 of the code is stored.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function issuePairing(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $code = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        $ttl  = max(300, Env::get('PAIRING_CODE_TTL') !== null ? (int)Env::get('PAIRING_CODE_TTL') : 86400);
+        $expiresUtc = gmdate('Y-m-d H:i:s', time() + $ttl);
+
+        // Retire any earlier code FIRST. This has to happen before the insert:
+        // invalidatePairings() burns every unused code for the store, which would
+        // include the one we just created if it ran afterwards, leaving the admin
+        // with a code that can never be redeemed.
+        $this->stores->invalidatePairings($storeId);
+        $this->stores->issuePairing($storeId, (int)$admin['id'], hash('sha256', $code), $expiresUtc, $this->sealCode($code));
+        Audit::log($this->db, (int)$admin['id'], Audit::PAIRING_ISSUED, $storeId, $req->ip, $req->userAgent, ['ttl_seconds' => $ttl]);
+
+        $mailNote = $this->notifyOwner($store, $admin, $req, 'Your ProCast activation code', sprintf(
+            '<p>Hello %s,</p>'
+            . '<p>Your activation code for <strong>%s</strong> is:</p>'
+            . '<p style="font-size:28px;font-weight:800;letter-spacing:.3em;margin:20px 0;">%s</p>'
+            . '<p>Open ProCast on the computer you want to install it on and enter this code when asked. '
+            . 'It works <strong>once</strong>, and expires on <strong>%s UTC</strong>.</p>'
+            . '<p>If you did not request this, you can ignore this email &mdash; nothing has changed.</p>',
+            View::e($store['owner_name'] ?? ''),
+            View::e($store['name']),
+            View::e($code),
+            View::e(gmdate('Y-m-d H:i', time() + $ttl))
+        ));
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'Store link code for ' . (string)$store['name'] . ' (does not unlock accounts, expires ' . gmdate('H:i', time() + $ttl) . ' UTC)',
+            'value'  => $code,
+            // Renders the large digits + "Copy code" button instead of the
+            // "save this key, never shown again" block used for API keys.
+            'isCode' => true,
+        ];
+        return $this->flashBack($session, $storeId, 'success', 'Activation code issued. ' . $mailNote);
+    }
+
+    /**
+     * Issues a 6-digit code for ONE account of a store. This is the gate every
+     * person must pass to use the local POS — including cashier/staff accounts
+     * created later in Settings, which is why it is per-user and not per-store.
+     *
+     * The code is emailed to the account holder (falling back to the owner when
+     * the account has no email of its own) and shown once on screen in case the
+     * mail is filtered.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function issueUserPairing(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $store   = $storeId > 0 ? $this->stores->find($storeId) : null;
+        if ($store === null) {
+            return $this->flashBack($session, $storeId, 'error', 'That account is not linked to a store.');
+        }
+
+        // Minted collision-free against every other live code. Two accounts
+        // sharing digits would be a real outage: redemption is one atomic
+        // UPDATE, so redeeming one would burn both and lock out a user who
+        // typed a perfectly valid code.
+        $mint = $this->stores->mintUniqueUserCode();
+        if ($mint === null) {
+            return $this->flashBack($session, $storeId, 'error', 'Could not generate a unique code right now. Please try again.');
+        }
+        $code = $mint['code'];
+        $role = (string)($user['role'] ?? '');
+        $ttl  = max(300, Env::get('PAIRING_CODE_TTL') !== null ? (int)Env::get('PAIRING_CODE_TTL') : 86400);
+
+        // The role is recorded on the code so redemption can verify it is still
+        // the account's current role. A code issued to a cashier must stop
+        // working the moment that account is promoted, rather than silently
+        // granting the new, higher role to whoever was holding the old code.
+        $this->stores->issueUserPairing($userId, $storeId, (int)$admin['id'], $mint['hash'], gmdate('Y-m-d H:i:s', time() + $ttl), $this->sealCode($code), $role);
+        Audit::log($this->db, (int)$admin['id'], Audit::PAIRING_ISSUED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'scope'   => 'user',
+            'role'    => $role,
+            'ttl_seconds' => $ttl,
+        ]);
+
+        // Send to the account holder; fall back to the owner when the account
+        // has no email of its own (e.g. cashier accounts without personal email).
+        $target = trim((string)($user['email'] ?? ''));
+        $recipientName = (string)($user['full_name'] ?? '');
+        $isOwnerFallback = false;
+        if ($target === '' && !empty($store['owner_email'])) {
+            $target = trim((string)$store['owner_email']);
+            $recipientName = (string)($store['owner_name'] ?? 'Store Owner');
+            $isOwnerFallback = true;
+        }
+
+        $mailNote = '';
+        if ($target !== '') {
+            $intro = $isOwnerFallback
+                ? sprintf('<p>Hello %s,</p><p>An activation code was requested for your store\'s account <strong>%s</strong> (role: <strong>%s</strong>):</p>', View::e($recipientName), View::e($user['username']), View::e($role ?: 'cashier'))
+                : sprintf('<p>Hello %s,</p><p>Your activation code for your ProCast account <strong>%s</strong> is:</p>', View::e($recipientName), View::e($user['username']));
+
+            [$ok, $msg] = Mailer::send($target, $recipientName, 'Your ProCast activation code',
+                $intro
+                . '<p style="font-size:28px;font-weight:800;letter-spacing:.3em;margin:20px 0;color:#2f7ff5;">' . View::e($code) . '</p>'
+                . '<p>Open ProCast on the computer you use at the till, enter this code when asked, '
+                . 'then sign in with the username and password. It works <strong>once</strong>, '
+                . 'and expires on <strong>' . View::e(gmdate('Y-m-d H:i', time() + $ttl)) . ' UTC</strong>.</p>'
+                . '<p>You only need it the first time &mdash; your computer stays activated.</p>'
+            );
+            Audit::log($this->db, (int)$admin['id'], $ok ? Audit::EMAIL_SENT : Audit::EMAIL_FAILED, $storeId, $req->ip, $req->userAgent, ['subject' => 'activation code', 'user_id' => $userId, 'result' => $ok ? 'sent' : $msg]);
+            $recipientDesc = $isOwnerFallback ? 'store owner (' . $target . ') for ' . $user['username'] : $target;
+            $mailNote = $ok ? 'Code emailed automatically to ' . $recipientDesc . '.' : 'Email FAILED (' . $msg . ') — read or copy the code below.';
+        } else {
+            $mailNote = 'This account and store have no email on file, so read the code below to the user.';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'Activation code for ' . (string)$user['username'] . ' (expires ' . gmdate('H:i', time() + $ttl) . ' UTC)',
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        return $this->flashBack($session, $storeId, 'success', 'Activation code issued for ' . (string)$user['username'] . '. ' . $mailNote);
+    }
+
+    /**
+     * Encrypts an activation code for later re-copying by a super admin.
+     *
+     * Email is only a convenience here — the admin is the real fallback channel,
+     * because they are the one who can re-issue or talk the user through it. So a
+     * code must survive the admin closing the tab or navigating away, otherwise
+     * they would have to revoke and re-mint a perfectly good code.
+     *
+     * Encryption is best-effort on purpose: if PLATFORM_ENC_KEY is missing or
+     * broken we still issue the code (hash + email + on-screen flash), just
+     * without the re-copy fallback. Refusing to issue would turn a
+     * misconfiguration into an outage; losing re-copy is a far smaller problem
+     * than nobody being able to activate at all.
+     */
+    private function sealCode(string $code): ?string
+    {
+        try {
+            return Crypto::encrypt($code);
+        } catch (\Throwable $e) {
+            error_log('Pairing code could not be sealed for re-copy: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Re-shows one account's LIVE activation code so the admin can copy it by
+     * hand when the email didn't arrive.
+     *
+     * Restricted to codes that are still unused and unexpired — once a code is
+     * spent or stale there is nothing useful to hand over, and showing it would
+     * only invite the admin to pass on a code that cannot work. Every reveal is
+     * audited, since it hands a live credential to whoever is at the keyboard.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function revealUserPairing(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $username = (string)$user['username'];
+
+        $cipher = $this->stores->liveUserPairingCipher($userId, gmdate('Y-m-d H:i:s'));
+        if ($cipher === null) {
+            return $this->flashBack($session, $storeId, 'error',
+                'No live activation code for ' . $username . ' — it has already been used, revoked, or expired. Issue a new one.');
+        }
+
+        try {
+            $code = Crypto::decrypt($cipher);
+        } catch (\Throwable $e) {
+            return $this->flashBack($session, $storeId, 'error',
+                'The stored code could not be decrypted. Issue a new one.');
+        }
+
+        Audit::log($this->db, (int)$admin['id'], Audit::PAIRING_REVEALED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $username,
+        ]);
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'Activation code for ' . $username . ' (valid once — hand it over and let them activate)',
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        return $this->flashBack($session, $storeId, 'success', 'Code shown below. Copy it for ' . $username . '.');
+    }
+
+    /**
+     * Re-shows a store's LIVE whole-store code so the admin can copy it when the
+     * email never arrived.
+     *
+     * The store-scope twin of revealUserPairing(), and it matters more here: a
+     * single code covers every account on that till, so losing it to a failed
+     * email blocks the whole team, not just one person.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function revealPairing(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+
+        $cipher = $this->stores->liveStorePairingCipher($storeId, gmdate('Y-m-d H:i:s'));
+        if ($cipher === null) {
+            return $this->flashBack($session, $storeId, 'error',
+                'No live whole-store code — it has already been used, replaced, or expired. Generate a new one.');
+        }
+
+        try {
+            $code = Crypto::decrypt($cipher);
+        } catch (\Throwable) {
+            return $this->flashBack($session, $storeId, 'error',
+                'The stored code could not be decrypted. Generate a new one.');
+        }
+
+        Audit::log($this->db, (int)$admin['id'], Audit::PAIRING_REVEALED, $storeId, $req->ip, $req->userAgent, [
+            'scope' => 'store',
+        ]);
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'Store link code for ' . (string)$store['name'] . ' — unlocks no account',
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        return $this->flashBack($session, $storeId, 'success', 'Code shown below. Copy it for ' . (string)$store['name'] . '.');
+    }
+
+    /**
+     * Kills one account's live activation code without touching the others.
+     *
+     * Needed whenever a code has to be pulled back without minting a replacement:
+     * it leaked to the wrong person, the user was issued the wrong role, or the
+     * till is being rebuilt. "Issue new code" also retires the old code, but it
+     * simultaneously hands out a fresh credential and emails it — which is the
+     * wrong move when the whole point is to make sure nobody new can activate
+     * with what they were holding.
+     *
+     * Only UNUSED codes are revoked. A redeemed code is history: the account is
+     * already activated, and rewriting used_at on it would falsify the audit
+     * trail that records when the activation actually happened.
+     *
+     * @param array<string,mixed> $admin
+     */
+    public function revokeUserPairing(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId  = (int)($user['store_id'] ?? 0);
+        $username = (string)$user['username'];
+
+        // Confirm against the person, not the store: revoking is per-account, so
+        // an admin who means to kill one cashier's code should not be stopped by
+        // having to retype a business name they did not have in mind.
+        if (!$this->confirmed($req, $username)) {
+            return $this->flashBack($session, $storeId, 'error',
+                'Type the exact username (' . $username . ') to confirm.');
+        }
+
+        // hasLiveUserPairing(), not liveUserPairingCipher(): the code an admin
+        // cannot read is exactly the one they most need to revoke.
+        $hadLive = $this->stores->hasLiveUserPairing($userId);
+
+        $this->stores->revokeUserPairing($userId);
+
+        Audit::log($this->db, (int)$admin['id'], Audit::PAIRING_REVOKED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $username,
+            'scope'   => 'user',
+            'had_live_code' => $hadLive,
+        ]);
+
+        return $this->flashBack($session, $storeId, 'success',
+            $hadLive
+                ? 'Activation code for ' . $username . ' revoked. It can no longer be used.'
+                : 'No unused code was live for ' . $username . ' — nothing needed revoking.');
+    }
+
+    // ── Lifecycle actions (POST, CSRF already verified by the Kernel) ─────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function approve(Request $req, array &$session, array $admin, int $storeId, int $now): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $tier = $req->input('subscription_tier', 'standard');
+        if (!in_array($tier, self::TIERS, true)) {
+            return $this->flashBack($session, $storeId, 'error', 'Choose a valid subscription tier.');
+        }
+
+        $apiKey = 'pk_live_' . bin2hex(random_bytes(24));
+        $this->db->beginTransaction();
+        try {
+            if (!$this->stores->approve($storeId, (int)$admin['id'], $tier, hash('sha256', $apiKey), gmdate('Y-m-d H:i:s', $now))) {
+                $this->db->rollBack();
+                return $this->flashBack($session, $storeId, 'error', 'Only stores pending approval can be approved.');
+            }
+            $this->stores->seedDefaults($storeId, (string)$store['name']);
+            Audit::log($this->db, (int)$admin['id'], Audit::STORE_APPROVED, $storeId, $req->ip, $req->userAgent, ['tier' => $tier, 'name' => $store['name']]);
+            $this->db->commit();
+        } catch (\Throwable $t) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            return $this->flashBack($session, $storeId, 'error', 'Approval failed and was rolled back.');
+        }
+
+        $mailNote = $this->notifyOwner($store, $admin, $req, 'Your ProCast store has been approved', sprintf(
+            '<p>Hello %s,</p><p>Your store <strong>%s</strong> has been approved. You can now sign in to ProCast with the username and password you registered.</p>'
+            . '<p>Your production API key (shown once — keep it secret):<br><code>%s</code></p>',
+            View::e($store['owner_name'] ?? ''), View::e($store['name']), View::e($apiKey)
+        ));
+        $session['sa_flash_secret'] = ['label' => 'Production API key (shown once)', 'value' => $apiKey];
+        return $this->flashBack($session, $storeId, 'success', 'Store approved, defaults seeded. ' . $mailNote);
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function reject(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $reason = trim($req->input('reason'));
+        if (mb_strlen($reason) < 10 || mb_strlen($reason) > 500) {
+            return $this->flashBack($session, $storeId, 'error', 'A rejection reason of 10–500 characters is required.');
+        }
+        if (!$this->confirmed($req, (string)$store['name'])) {
+            return $this->flashBack($session, $storeId, 'error', 'Type the exact store name to confirm.');
+        }
+        $this->db->beginTransaction();
+        try {
+            if (!$this->stores->reject($storeId, $reason)) {
+                $this->db->rollBack();
+                return $this->flashBack($session, $storeId, 'error', 'Only stores pending approval can be rejected.');
+            }
+            Audit::log($this->db, (int)$admin['id'], Audit::STORE_REJECTED, $storeId, $req->ip, $req->userAgent, ['reason' => $reason]);
+            $this->db->commit();
+        } catch (\Throwable) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            return $this->flashBack($session, $storeId, 'error', 'Rejection failed and was rolled back.');
+        }
+        $note = $this->notifyOwner($store, $admin, $req, 'Your ProCast store application', sprintf(
+            '<p>Hello %s,</p><p>We could not approve <strong>%s</strong>.</p><p><strong>Reason:</strong> %s</p>',
+            View::e($store['owner_name'] ?? ''), View::e($store['name']), View::e($reason)
+        ));
+        return $this->flashBack($session, $storeId, 'success', 'Application rejected. ' . $note);
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function suspend(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        // The reason is OPTIONAL, exactly as it is for the hard delete. It used to
+        // be mandatory (10-500 chars) while the modal required the admin to type
+        // the store name as well, and the view asked for the literal "SUSPEND"
+        // that this method never accepted -- so suspending always dead-ended on
+        // "Type the exact store name to confirm". The typed store name below is
+        // the real authorisation; a blank reason is recorded explicitly so the
+        // audit trail never contains a silent blank.
+        $reason = trim($req->input('reason'));
+        if ($reason !== '' && (mb_strlen($reason) < 10 || mb_strlen($reason) > 500)) {
+            return $this->flashBack($session, $storeId, 'error', 'A suspension reason must be 10-500 characters, or left blank.');
+        }
+        if ($reason === '') {
+            $reason = 'Not given';
+        }
+        if (!$this->confirmed($req, (string)$store['name'])) {
+            return $this->flashBack($session, $storeId, 'error', 'Type the exact store name to confirm.');
+        }
+        $this->db->beginTransaction();
+        try {
+            if (!$this->stores->suspend($storeId, $reason)) {
+                $this->db->rollBack();
+                return $this->flashBack($session, $storeId, 'error', 'Only active stores can be suspended.');
+            }
+            $revoked = $this->stores->revokeStoreTokens($storeId);
+            Audit::log($this->db, (int)$admin['id'], Audit::STORE_SUSPENDED, $storeId, $req->ip, $req->userAgent, ['reason' => $reason, 'tokens_revoked' => $revoked]);
+            $this->db->commit();
+        } catch (\Throwable) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            return $this->flashBack($session, $storeId, 'error', 'Suspension failed and was rolled back.');
+        }
+        return $this->flashBack($session, $storeId, 'success', "Store suspended. {$revoked} login token(s) revoked; cashier logins are blocked immediately.");
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function reactivate(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $apiKey = 'pk_live_' . bin2hex(random_bytes(24));
+        $this->db->beginTransaction();
+        try {
+            if (!$this->stores->reactivate($storeId, hash('sha256', $apiKey))) {
+                $this->db->rollBack();
+                return $this->flashBack($session, $storeId, 'error', 'Only suspended stores can be reactivated.');
+            }
+            Audit::log($this->db, (int)$admin['id'], Audit::STORE_REACTIVATED, $storeId, $req->ip, $req->userAgent, []);
+            $this->db->commit();
+        } catch (\Throwable) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            return $this->flashBack($session, $storeId, 'error', 'Reactivation failed and was rolled back.');
+        }
+        $session['sa_flash_secret'] = ['label' => 'New production API key (shown once)', 'value' => $apiKey];
+        return $this->flashBack($session, $storeId, 'success', 'Store reactivated with a new API key.');
+    }
+
+    // ── Verification document (authenticated stream) ──────────────────────
+    /** @param array<string,mixed> $admin */
+    public function document(Request $req, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        $file = is_array($store) ? (string)($store['verification_doc'] ?? '') : '';
+        // Stored names are server-generated; re-validate so a poisoned DB value can't traverse.
+        if (!preg_match('/^[a-f0-9]{32}\.(pdf|jpg|png)$/', $file)) {
+            return Response::notFound();
+        }
+        $dir = realpath(PROCAST_ROOT . '/uploads/verification');
+        $path = $dir !== false ? realpath($dir . '/' . $file) : false;
+        if ($dir === false || $path === false || strncmp($path, $dir . DIRECTORY_SEPARATOR, strlen($dir) + 1) !== 0) {
+            return Response::notFound();
+        }
+        Audit::log($this->db, (int)$admin['id'], Audit::DOCUMENT_VIEWED, $storeId, $req->ip, $req->userAgent, ['file' => $file]);
+        $types = ['pdf' => 'application/pdf', 'jpg' => 'image/jpeg', 'png' => 'image/png'];
+        $r = new Response(200, '', [
+            'Content-Type'        => $types[pathinfo($file, PATHINFO_EXTENSION)],
+            'Content-Disposition' => 'attachment; filename="verification-' . $storeId . '.' . pathinfo($file, PATHINFO_EXTENSION) . '"',
+        ]);
+        $r->filePath = $path;
+        return $r;
+    }
+
+    // ── User activity inspector ───────────────────────────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function users(Request $req, array &$session, array $admin, int $now): Response
+    {
+        $q = mb_substr($req->queryStr('q'), 0, 100);
+        if ($q !== '') {
+            Audit::log($this->db, (int)$admin['id'], Audit::USER_SEARCH, null, $req->ip, $req->userAgent, ['q' => $q]);
+        }
+        return $this->page('users', $session, $admin, 'User activity', 'users', [
+            'rows' => $this->stores->searchUsers($q, $now),
+            'q' => $q,
+            'now' => $now,
+        ]);
+    }
+
+    // ── helpers ───────────────────────────────────────────────────────────
+    /**
+     * Destructive-action gate: the caller must retype $expected exactly.
+     *
+     * $expected is not always a store name — per-user pairing revocation asks for
+     * the username instead, because the admin's target there is one person
+     * rather than the whole business.
+     */
+    private function confirmed(Request $req, string $expected): bool
+    {
+        return hash_equals($expected, $req->input('confirm_text'));
+    }
+
+    /**
+     * @param array<string,mixed> $store
+     * @param array<string,mixed> $admin
+     */
+    private function notifyOwner(array $store, array $admin, Request $req, string $subject, string $html): string
+    {
+        $to = trim((string)($store['owner_email'] ?? ''));
+        if ($to === '') {
+            $owner = $this->stores->ownerOf((int)$store['id']);
+            $to = trim((string)($owner['email'] ?? ''));
+        }
+        if ($to === '') {
+            return 'No owner email on file — no notification sent.';
+        }
+        [$ok, $msg] = Mailer::send($to, (string)($store['owner_name'] ?? ''), $subject, $html);
+        Audit::log($this->db, (int)$admin['id'], $ok ? Audit::EMAIL_SENT : Audit::EMAIL_FAILED, (int)$store['id'], $req->ip, $req->userAgent, ['subject' => $subject, 'result' => $ok ? 'sent' : $msg]);
+        return $ok ? 'Owner notified by email.' : 'Email could not be sent (' . $msg . ').';
+    }
+
+    /** @param array<string,mixed> $session */
+    private function flashBack(array &$session, int $storeId, string $type, string $msg): Response
+    {
+        $session['sa_flash'] = ['type' => $type, 'msg' => $msg];
+        return Response::redirect('/stores/' . $storeId);
+    }
+
+    // ── Approvals Queue (redirected to Stores page) ──────────────────────
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function approvals(Request $req, array &$session, array $admin, int $now): Response
+    {
+        return Response::redirect('/stores?status=pending_approval');
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function approveStaff(Request $req, array &$session, array $admin, int $userId, int $now): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $store = $storeId > 0 ? $this->stores->find($storeId) : null;
+
+        $code = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+        $codeHash = hash('sha256', $code);
+        $ttl = 7 * 86400; // 7 days
+        $expiresUtc = gmdate('Y-m-d H:i:s', $now + $ttl);
+
+        if (!$this->stores->approveStaffAccount($userId, $codeHash, $expiresUtc, $this->sealCode($code))) {
+            $session['sa_flash'] = ['type' => 'error', 'msg' => 'Could not approve staff account — it may already be approved.'];
+            return Response::redirect('/stores?status=pending_approval');
+        }
+
+        Audit::log($this->db, (int)$admin['id'], Audit::STAFF_APPROVED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $user['username'],
+        ]);
+
+        // Email to staff member and CC store owner
+        $targetEmail = trim((string)($user['email'] ?? ''));
+        $targetName = (string)($user['full_name'] ?: $user['username']);
+        $ownerEmail = trim((string)($store['owner_email'] ?? ''));
+        $ownerName = (string)($store['owner_name'] ?? 'Store Owner');
+
+        $cc = [];
+        if ($ownerEmail !== '' && filter_var($ownerEmail, FILTER_VALIDATE_EMAIL) && strtolower($ownerEmail) !== strtolower($targetEmail)) {
+            $cc[] = ['email' => $ownerEmail, 'name' => $ownerName];
+        }
+
+        $mailNote = '';
+        if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+            $subject = 'Your ProCast Staff Account Has Been Approved';
+            $html = sprintf(
+                '<p>Hello %s,</p>'
+                . '<p>Your staff account (<strong>%s</strong>) for <strong>%s</strong> has been approved by the Super Admin.</p>'
+                . '<p>Your 6-digit access code for first-time login verification is:</p>'
+                . '<p style="font-size:32px;font-weight:800;letter-spacing:.3em;color:#2f7ff5;margin:20px 0;">%s</p>'
+                . '<p>Please enter this code upon logging into ProCast to activate your session. This code is valid for 7 days.</p>',
+                View::e($targetName),
+                View::e($user['username']),
+                View::e($store['name'] ?? 'ProCast Store'),
+                View::e($code)
+            );
+            [$ok, $msg] = Mailer::send($targetEmail, $targetName, $subject, $html, $cc);
+            $mailNote = $ok ? ' Notification email with 6-digit code sent to staff member' . (!empty($cc) ? ' (and CC\'ed owner).' : '.') : ' (Email delivery failed: ' . $msg . ')';
+        } else {
+            $mailNote = ' (No email on file for staff member — copy code below to provide manually).';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'Assigned 6-digit access code for staff: ' . (string)$user['username'],
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        $session['sa_flash'] = ['type' => 'success', 'msg' => 'Staff account "' . (string)$user['username'] . '" approved.' . $mailNote];
+        return Response::redirect('/stores?status=pending_approval');
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function rejectStaff(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $reason = trim((string)$req->input('reason'));
+        if ($reason === '') {
+            $reason = 'Application did not meet requirements.';
+        }
+
+        if (!$this->stores->rejectStaffAccount($userId, $reason)) {
+            $session['sa_flash'] = ['type' => 'error', 'msg' => 'Could not reject staff account.'];
+            return Response::redirect('/stores?status=pending_approval');
+        }
+
+        Audit::log($this->db, (int)$admin['id'], Audit::STAFF_REJECTED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'reason'  => $reason,
+        ]);
+
+        $targetEmail = trim((string)($user['email'] ?? ''));
+        if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+            Mailer::send($targetEmail, (string)($user['full_name'] ?: $user['username']), 'ProCast Staff Application Update',
+                sprintf('<p>Hello %s,</p><p>Your application for a staff account (<strong>%s</strong>) was not approved.</p><p><strong>Reason:</strong> %s</p>',
+                    View::e($user['full_name'] ?: $user['username']), View::e($user['username']), View::e($reason)
+                )
+            );
+        }
+
+        $session['sa_flash'] = ['type' => 'success', 'msg' => 'Staff account "' . (string)$user['username'] . '" rejected.'];
+        return Response::redirect('/stores?status=pending_approval');
+    }
+
+    /** @param array<string,mixed> $session @param array<string,mixed> $admin */
+    public function regenerateUserCode(Request $req, array &$session, array $admin, int $userId): Response
+    {
+        $user = $this->stores->findUser($userId);
+        if ($user === null) {
+            return Response::notFound();
+        }
+        $storeId = (int)($user['store_id'] ?? 0);
+        $store = $storeId > 0 ? $this->stores->find($storeId) : null;
+
+        $code = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+        $codeHash = hash('sha256', $code);
+        $ttl = 7 * 86400; // 7 days
+        $expiresUtc = gmdate('Y-m-d H:i:s', time() + $ttl);
+
+        $this->stores->setAccountActivationCode($userId, $codeHash, $expiresUtc, $this->sealCode($code));
+
+        Audit::log($this->db, (int)$admin['id'], Audit::CODE_REGENERATED, $storeId, $req->ip, $req->userAgent, [
+            'user_id' => $userId,
+            'username' => $user['username'],
+        ]);
+
+        $targetEmail = trim((string)($user['email'] ?? ''));
+        $targetName = (string)($user['full_name'] ?: $user['username']);
+        $ownerEmail = trim((string)($store['owner_email'] ?? ''));
+        $ownerName = (string)($store['owner_name'] ?? 'Store Owner');
+
+        $cc = [];
+        if ($ownerEmail !== '' && filter_var($ownerEmail, FILTER_VALIDATE_EMAIL) && strtolower($ownerEmail) !== strtolower($targetEmail)) {
+            $cc[] = ['email' => $ownerEmail, 'name' => $ownerName];
+        }
+
+        $mailNote = '';
+        if ($targetEmail !== '' && filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+            $subject = 'Your New ProCast 6-Digit Access Code';
+            $html = sprintf(
+                '<p>Hello %s,</p>'
+                . '<p>A new 6-digit access code has been generated for your ProCast account (<strong>%s</strong>):</p>'
+                . '<p style="font-size:32px;font-weight:800;letter-spacing:.3em;color:#2f7ff5;margin:20px 0;">%s</p>'
+                . '<p>Any previous code has been invalidated. This code is valid for 7 days.</p>',
+                View::e($targetName),
+                View::e($user['username']),
+                View::e($code)
+            );
+            [$ok, $msg] = Mailer::send($targetEmail, $targetName, $subject, $html, $cc);
+            $mailNote = $ok ? ' New code emailed to user.' : ' (Email failed: ' . $msg . ')';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => 'New 6-digit access code for ' . (string)$user['username'] . ' (expires in 7 days)',
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        $session['sa_flash'] = ['type' => 'success', 'msg' => 'New code generated for ' . (string)$user['username'] . '.' . $mailNote];
+
+        $from = $req->queryStr('from') ?: $req->input('from');
+        return Response::redirect($from === 'users' ? '/users' : ($from === 'store' ? '/stores/' . $storeId : '/approvals'));
+    }
+
+    /** Generates 6-digit unlock code for locked Store Owner. */
+    public function generateOwnerUnlockCode(Request $req, array &$session, array $admin, int $storeId): Response
+    {
+        $store = $this->stores->find($storeId);
+        if ($store === null) {
+            return Response::notFound();
+        }
+        $owner = $this->stores->ownerOf($storeId);
+        if ($owner === null) {
+            return $this->flashBack($session, $storeId, 'error', 'No owner account found for this store.');
+        }
+
+        $ownerId = (int)$owner['id'];
+        $code = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+        $codeHash = hash('sha256', $code);
+        $ttl = 7 * 86400; // 7 days
+        $expiresUtc = gmdate('Y-m-d H:i:s', time() + $ttl);
+
+        $this->stores->setAccountActivationCode($ownerId, $codeHash, $expiresUtc, $this->sealCode($code));
+
+        Audit::log($this->db, (int)$admin['id'], Audit::OWNER_UNLOCKED, $storeId, $req->ip, $req->userAgent, [
+            'owner_id' => $ownerId,
+            'username' => $owner['username'],
+        ]);
+
+        $ownerEmail = trim((string)($owner['email'] ?? $store['owner_email'] ?? ''));
+        $ownerName = (string)($owner['full_name'] ?: $store['owner_name'] ?: 'Store Owner');
+
+        $mailNote = '';
+        if ($ownerEmail !== '' && filter_var($ownerEmail, FILTER_VALIDATE_EMAIL)) {
+            $subject = 'Your ProCast 6-Digit Activation Unlock Code';
+            $html = sprintf(
+                '<p>Hello %s,</p>'
+                . '<p>Your 6-digit access code to activate and unlock your store <strong>%s</strong> is:</p>'
+                . '<p style="font-size:32px;font-weight:800;letter-spacing:.3em;color:#2f7ff5;margin:20px 0;">%s</p>'
+                . '<p>Open ProCast, sign in, and enter this code when prompted to activate your account with full access.</p>',
+                View::e($ownerName),
+                View::e($store['name']),
+                View::e($code)
+            );
+            [$ok, $msg] = Mailer::send($ownerEmail, $ownerName, $subject, $html);
+            $mailNote = $ok ? ' Unlock code emailed to ' . $ownerEmail . '.' : ' (Email failed: ' . $msg . ')';
+        }
+
+        $session['sa_flash_secret'] = [
+            'label'  => '6-digit unlock code for Store Owner ' . (string)$owner['username'],
+            'value'  => $code,
+            'isCode' => true,
+        ];
+        return $this->flashBack($session, $storeId, 'success', 'Unlock code issued for store owner.' . $mailNote);
+    }
+
+    /**
+     * @param array<string,mixed> $session
+     * @param array<string,mixed> $admin
+     * @param array<string,mixed> $vars
+     */
+    private function page(string $view, array &$session, array $admin, string $title, string $nav, array $vars): Response
+    {
+        $flash = $session['sa_flash'] ?? null;
+        $secret = $session['sa_flash_secret'] ?? null;
+        unset($session['sa_flash'], $session['sa_flash_secret']);
+        $pendingApprovalsCount = $this->stores->pendingApprovalsCount();
+        return Response::html(View::render($view, $vars + [
+            'title' => $title, 'nav' => $nav, 'admin' => $admin,
+            'csrf' => Csrf::token($session), 'flash' => $flash, 'flashSecret' => $secret,
+            'pendingApprovalsCount' => $pendingApprovalsCount,
+        ]));
+    }
+}
