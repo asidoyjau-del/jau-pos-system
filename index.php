@@ -2323,7 +2323,7 @@ function renderAccessRevoked(string $status, string $reason): void
         $reasonHtml = '<p style="margin:0 0 4px;font-size:.72rem;letter-spacing:.09em;text-transform:uppercase;color:#94a3b8;">Reason on record</p>'
             . '<p style="margin:0;color:#e2e8f0;font-size:.95rem;line-height:1.55;">' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8') . '</p>';
     }
-    echo '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+    echo '<!DOCTYPE html><html lang="en"><head>\n    <meta name="text-scale" content="scale" />\n    <meta name="color-scheme" content="light dark" /><meta charset="utf-8">'
         . '<meta name="viewport" content="width=device-width,initial-scale=1">'
         . '<title>' . htmlspecialchars($heading, ENT_QUOTES, 'UTF-8') . ' — ProCast</title>'
         . '<link rel="stylesheet" href="assets/style.css"></head>'
@@ -8543,24 +8543,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
         (function() {
             var isAppPage = <?= json_encode(!$isAuthPage) ?>;
             window.isAppPage = isAppPage;
-            if (isAppPage && localStorage.getItem('pos_theme') === 'light') {
-                document.documentElement.classList.add('theme-light');
-            }
 
-            // ── CUSTOM SYSTEM THEME (Settings → System Theme) ──
-            // Same before-first-paint approach as the dark/light class above, so a
-            // saved custom palette/font never flashes the default look first. A
-            // small self-contained color-mixing toolkit lives here (and is exposed
-            // on window) so the Settings page's live-preview controls can reuse the
-            // exact same derivation instead of a second copy going out of sync.
-            // Only 4 colors are ever asked of the person (Background, Surface,
-            // Text, Accent) — every other variable this app actually uses
-            // (--surface2, --border, --text2, --text3, --accent2) is DERIVED from
-            // those 4 by blending toward text/white, which keeps the whole app
-            // visually coherent (hover states, borders, muted labels all still
-            // relate correctly to each other) without needing a dozen separate
-            // pickers, and works the same whether the person's chosen theme ends
-            // up dark-on-light or light-on-dark.
             function hexToRgb(hex) {
                 hex = String(hex || '').replace('#', '');
                 if (hex.length === 3) hex = hex.split('').map(function(c) { return c + c; }).join('');
@@ -8575,8 +8558,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             }
 
             function hexMix(hexA, hexB, t) {
-                var a = hexToRgb(hexA),
-                    b = hexToRgb(hexB);
+                var a = hexToRgb(hexA), b = hexToRgb(hexB);
                 return rgbToHex(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
             }
 
@@ -8585,34 +8567,100 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 return (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
             }
 
-            function applyCustomThemeVars(t) {
-                if (!t || !t.bg || !t.surface || !t.text || !t.accent) return;
-                var root = document.documentElement.style;
-                root.setProperty('--bg', t.bg);
-                root.setProperty('--surface', t.surface);
-                root.setProperty('--surface2', hexMix(t.surface, t.text, 0.06));
-                root.setProperty('--border', hexMix(t.surface, t.text, 0.16));
-                root.setProperty('--text', t.text);
-                root.setProperty('--text2', hexMix(t.text, t.bg, 0.25));
-                root.setProperty('--text3', hexMix(t.text, t.bg, 0.45));
-                root.setProperty('--accent', t.accent);
-                root.setProperty('--accent2', hexMix(t.accent, '#ffffff', 0.25));
-                root.setProperty('--user-font-family', t.font || "'Inter', sans-serif");
-                document.documentElement.style.fontSize = (t.fontSize || 100) + '%';
-                document.documentElement.style.colorScheme = relLuma(t.bg) < 0.5 ? 'dark' : 'light';
+            function getEffectiveMode(mode) {
+                if (mode === 'light') return 'light';
+                if (mode === 'dark') return 'dark';
+                return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
             }
+
+            function applyThemeConfig(cfg) {
+                if (!isAppPage) return;
+                cfg = cfg || {};
+                var mode = cfg.mode || 'system';
+                var effective = getEffectiveMode(mode);
+                var isLight = effective === 'light';
+
+                var rootStyle = document.documentElement.style;
+                var customProps = ['--bg', '--surface', '--surface2', '--border', '--text', '--text2', '--text3', '--accent', '--accent2', '--scrollbar-thumb', '--scrollbar-thumb-hover', '--scrollbar-track', '--user-font-family', '--user-font-scale'];
+                for (var i = 0; i < customProps.length; i++) {
+                    rootStyle.removeProperty(customProps[i]);
+                }
+
+                var c = cfg.custom;
+                // Auto-adapt mode: When custom colors are set, their background luminance immediately dictates theme-light vs dark styling
+                if (c && c.bg && c.surface && c.text && c.accent) {
+                    var customIsLight = relLuma(c.bg) >= 0.5;
+                    document.documentElement.classList.toggle('theme-light', customIsLight);
+                    document.documentElement.style.colorScheme = customIsLight ? 'light' : 'dark';
+
+                    rootStyle.setProperty('--bg', c.bg);
+                    rootStyle.setProperty('--surface', c.surface);
+                    rootStyle.setProperty('--surface2', hexMix(c.surface, c.text, 0.06));
+                    rootStyle.setProperty('--border', hexMix(c.surface, c.text, 0.16));
+                    rootStyle.setProperty('--text', c.text);
+                    rootStyle.setProperty('--text2', hexMix(c.text, c.bg, 0.25));
+                    rootStyle.setProperty('--text3', hexMix(c.text, c.bg, 0.45));
+                    rootStyle.setProperty('--accent', c.accent);
+                    rootStyle.setProperty('--accent2', hexMix(c.accent, '#ffffff', 0.25));
+                    if (customIsLight) {
+                        rootStyle.setProperty('--scrollbar-thumb', hexMix(c.text, c.bg, 0.35));
+                        rootStyle.setProperty('--scrollbar-thumb-hover', hexMix(c.text, c.bg, 0.55));
+                        rootStyle.setProperty('--scrollbar-track', 'rgba(0, 0, 0, 0.04)');
+                    } else {
+                        rootStyle.setProperty('--scrollbar-thumb', hexMix(c.surface, c.text, 0.35));
+                        rootStyle.setProperty('--scrollbar-thumb-hover', hexMix(c.surface, c.text, 0.55));
+                        rootStyle.setProperty('--scrollbar-track', 'rgba(0, 0, 0, 0.3)');
+                    }
+                } else {
+                    document.documentElement.classList.toggle('theme-light', isLight);
+                    document.documentElement.style.colorScheme = isLight ? 'light' : 'dark';
+                }
+
+                // Typography & Text Scaling: Always apply independently
+                if (c && c.font) {
+                    rootStyle.setProperty('--user-font-family', c.font);
+                }
+                var fontSizePercent = (c && c.fontSize) ? parseFloat(c.fontSize) : 100;
+                if (!fontSizePercent || isNaN(fontSizePercent)) fontSizePercent = 100;
+                var fontScale = (fontSizePercent / 100).toFixed(4);
+                rootStyle.fontSize = fontSizePercent + '%';
+                rootStyle.setProperty('--user-font-scale', fontScale);
+            }
+
             window._themeUtil = {
                 hexToRgb: hexToRgb,
                 rgbToHex: rgbToHex,
                 hexMix: hexMix,
                 relLuma: relLuma,
-                applyCustomThemeVars: applyCustomThemeVars
+                getEffectiveMode: getEffectiveMode,
+                applyThemeConfig: applyThemeConfig
             };
+
             if (isAppPage) {
+                var storedCfg = null;
                 try {
-                    var saved = JSON.parse(localStorage.getItem('pos_custom_theme') || 'null');
-                    if (saved) applyCustomThemeVars(saved);
-                } catch (e) {}
+                    storedCfg = JSON.parse(localStorage.getItem('pos_theme_config') || 'null');
+                } catch(e) {}
+                if (!storedCfg) {
+                    var legacyTheme = localStorage.getItem('pos_theme');
+                    var legacyCustom = null;
+                    try { legacyCustom = JSON.parse(localStorage.getItem('pos_custom_theme') || 'null'); } catch(e) {}
+                    storedCfg = {
+                        mode: legacyTheme === 'light' ? 'light' : (legacyTheme === 'dark' ? 'dark' : 'system'),
+                        custom: legacyCustom
+                    };
+                }
+                window._themeConfig = storedCfg;
+                applyThemeConfig(storedCfg);
+
+                if (window.matchMedia) {
+                    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+                        if (window._themeConfig && window._themeConfig.mode === 'system' && !window._themeConfig.custom) {
+                            applyThemeConfig(window._themeConfig);
+                            if (typeof syncThemeControls === 'function') syncThemeControls();
+                        }
+                    });
+                }
             }
         })();
     </script>
@@ -8839,6 +8887,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         if (!t) throw new ReferenceError("this hasn't been initialised - super() hasn't been called");
                         return !e || "object" != typeof e && "function" != typeof e ? t : e
                     }(this, (e.__proto__ || Object.getPrototypeOf(e)).call(this, t.substring(1), n));
+                    return r.byt
                     return r.bytes = t.split("").map((function(t) {
                         return t.charCodeAt(0)
                     })), r
@@ -11118,7 +11167,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             --accent: #2f7ff5;
             /* Default font — Settings → System Theme can override this via
                inline style on :root, same mechanism as the colors above. */
-            --user-font-family: 'Inter', sans-serif;
+            --user-font-family: 'Inter', sans-serif;\n            --user-font-scale: 1;
             /* Dark, high-contrast ink colors for text sitting on the LIGHT
                cream nav bar (both desktop .nav and mobile .mob-nav) — the
                main --text/--text2/--text3 tones above are made for the dark
@@ -11177,7 +11226,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             color: var(--text);
             min-height: 100vh;
             -webkit-font-smoothing: antialiased;
-            font-size: 15px;
+            font-size: calc(15px * var(--user-font-scale, 1));
             font-weight: 500;
             max-width: 100%;
             overflow-x: clip;
@@ -13727,13 +13776,26 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
         }
 
         ::-webkit-scrollbar {
-            width: 5px;
-            height: 5px;
+            width: 12px;
+            height: 12px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--scrollbar-track);
+            border-radius: 99px;
         }
 
         ::-webkit-scrollbar-thumb {
-            background: var(--border);
+            background: var(--scrollbar-thumb);
             border-radius: 99px;
+            border: 2px solid transparent;
+            background-clip: content-box;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--scrollbar-thumb-hover);
+            border: 1px solid transparent;
+            background-clip: content-box;
         }
 
         /* ── EXPIRY BADGES ── */
@@ -14141,7 +14203,6 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
      light) and ☀️ (currently light, click for dark); state also
      controllable from Settings → Appearance. -->
             <div class="nav-right">
-                <button type="button" id="theme-toggle-btn" class="nav-link" style="padding:6px 9px;" title="Switch to light mode" onclick="toggleTheme()">🌙</button>
                 <span class="nav-user-name" title="<?= htmlspecialchars($currentUser['full_name']) ?>"><?= htmlspecialchars($currentUser['full_name']) ?></span>
                 <?php if ($isCashierRole): ?>
                     <!-- Cashiers have no direct Logout link — the only way out is completing
@@ -16274,11 +16335,23 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 <label class="form-label">Discount Type</label>
                 <div style="display:flex;gap:8px;margin-bottom:12px;">
                     <button type="button" class="btn btn-secondary btn-sm" id="cd-type-percent" style="flex:1;" onclick="setCartDiscountType('percent')">% Percent Off</button>
-                    <button type="button" class="btn btn-secondary btn-sm" id="cd-type-amount" style="flex:1;" onclick="setCartDiscountType('amount')">₱ Amount Off</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="cd-type-amount" style="flex:1;" onclick="setCartDiscountType('amount')">₱ Amount Off</button>
                 </div>
 
-                <label class="form-label" id="cd-value-label">Percent Off (%)</label>
-                <input type="number" class="form-input" id="cd-value" placeholder="e.g. 20" min="0" step="1" oninput="updateCartDiscountPreview()" />
+                <label class="form-label" id="cd-value-label">Amount Off (₱)</label>
+                <input type="number" class="form-input" id="cd-value" placeholder="e.g. 5.00" min="0.01" step="0.01" oninput="updateCartDiscountPreview()" />
+
+                <div style="margin-top:10px;">
+                    <label class="form-label" style="display:flex;justify-content:space-between;align-items:center;">
+                        <span>Quantity to Discount (pcs)</span>
+                        <span style="font-size:.74rem;color:var(--text3);font-weight:normal;">In Cart: <strong id="cd-in-cart-qty">1</strong> pcs</span>
+                    </label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="number" class="form-input" id="cd-qty" min="1" step="1" placeholder="All pieces" oninput="updateCartDiscountPreview()" style="flex:1;" />
+                        <button type="button" class="btn btn-secondary btn-sm" id="cd-qty-all-btn" onclick="setCartDiscountAllQty()" style="white-space:nowrap;padding:7px 11px;font-size:.78rem;font-weight:600;">All (<span id="cd-max-qty">1</span> pcs)</button>
+                    </div>
+                    <div style="font-size:.72rem;color:var(--text3);margin-top:3px;">Specify how many pieces get this discount. The rest stay at regular price.</div>
+                </div>
 
                 <label class="form-label" style="margin-top:10px;">Reason <span style="color:var(--text3);font-weight:400;">(optional, shown on receipt)</span></label>
                 <input type="text" class="form-input" id="cd-reason" placeholder="e.g. Expiring tomorrow" />
@@ -16288,7 +16361,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 <div style="display:flex;gap:8px;margin-top:16px;">
                     <button type="button" class="btn btn-danger btn-sm" id="cd-remove-btn" style="display:none;" onclick="removeCartDiscount()">Remove Discount</button>
                     <button type="button" class="btn btn-secondary" style="flex:1;" onclick="closeModal('cart-discount-modal')">Cancel</button>
-                    <button type="button" class="btn btn-primary" style="flex:1;" onclick="applyCartDiscount()">Apply</button>
+                    <button type="button" class="btn btn-primary" id="cd-apply-btn" style="flex:1;" onclick="applyCartDiscount()">Apply</button>
                 </div>
             </div>
         </div>
@@ -17142,14 +17215,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         <p class="page-sub">Configure your store</p>
                     </div>
 
-                    <div class="card" style="margin-bottom:16px;">
-                        <div class="card-title">Appearance</div>
-                        <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;">
-                            <div>
-                                <div style="font-weight:700;font-size:.92rem;" id="appearance-theme-label">Dark mode</div>
-                                <div style="font-size:.78rem;color:var(--text3);margin-top:2px;">Switches the look of Dashboard, Products, Warehouse, Sales, Analytics, Forecast, and this Settings page. The public landing page always stays dark.</div>
-                            </div>
-                            <label class="switch">
+                    <label class="switch">
                                 <input type="checkbox" id="appearance-theme-toggle" onchange="applyTheme(this.checked ? 'light' : 'dark', true)" />
                                 <span class="switch-slider"></span>
                             </label>
@@ -17193,7 +17259,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                awkward corner background showing; Circle exports with
                transparent corners instead. -->
                                     <div style="display:flex;gap:8px;margin-bottom:10px;">
-                                        <button type="button" class="btn btn-secondary btn-sm" id="crop-shape-square" style="flex:1;" onclick="setCropShape('square')">⬜ Square</button>
+                                        <button type="button" class="btn btn-secondary btn-sm" id="crop-shape-square" style="flex:1;" onclick="setCropShape('square')">Square</button>
                                         <button type="button" class="btn btn-secondary btn-sm" id="crop-shape-circle" style="flex:1;" onclick="setCropShape('circle')">Circle</button>
                                     </div>
                                     <div id="crop-frame-wrap" style="width:280px;height:280px;margin:0 auto;border-radius:14px;overflow:hidden;border:2px solid var(--accent);touch-action:none;background:#1a1a1a;">
@@ -17237,22 +17303,68 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
        Theme makes it stick (stored per-browser, same as the existing
        Light/Dark toggle). Open to every role, not just the owner — it's a
        personal display preference, not a store-wide/security setting. -->
+                    <!-- ── SYSTEM THEME (Unified Theme Mode, Presets & Custom Palette) ── -->
                     <div class="card" style="margin-bottom:16px;">
                         <div class="card-title collapse-toggle" onclick="toggleCollapseCard('system-theme-wrap', this)" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;">
-                            <span>System Theme</span><span class="collapse-chevron">▾</span>
+                            <span style="font-weight:600;">System Theme</span><span class="collapse-chevron">▾</span>
                         </div>
-                        <div id="system-theme-wrap" class="collapse-body" style="display:none;">
-                            <p style="font-size:.78rem;color:var(--text2);margin-bottom:12px;">Pick your own colors, font, and text size for the app. Changes preview instantly — nothing is saved until you tap <b>Save Theme</b>. This is saved to this browser/device only.</p>
-                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:12px;">
-                                <div class="form-group" style="margin-bottom:0;"><label class="form-label">Background</label><input type="color" class="form-input" id="theme-bg-inp" style="height:38px;padding:3px;" oninput="previewSystemTheme()" /></div>
-                                <div class="form-group" style="margin-bottom:0;"><label class="form-label">Surface / Cards</label><input type="color" class="form-input" id="theme-surface-inp" style="height:38px;padding:3px;" oninput="previewSystemTheme()" /></div>
-                                <div class="form-group" style="margin-bottom:0;"><label class="form-label">Text</label><input type="color" class="form-input" id="theme-text-inp" style="height:38px;padding:3px;" oninput="previewSystemTheme()" /></div>
-                                <div class="form-group" style="margin-bottom:0;"><label class="form-label">Accent</label><input type="color" class="form-input" id="theme-accent-inp" style="height:38px;padding:3px;" oninput="previewSystemTheme()" /></div>
+                        <div id="system-theme-wrap" class="collapse-body">
+                            <p style="font-size:.78rem;color:var(--text2);margin-bottom:14px;">Select your display mode, pick from curated palette presets, or customize background, surfaces, font, and text size. Changes save directly to this browser.</p>
+
+                            <!-- 1. COLOR MODE SELECTOR (Segmented Buttons, Clean SVGs) -->
+                            <div style="margin-bottom:16px;">
+                                <label class="form-label" style="margin-bottom:6px;">Display Mode</label>
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;" id="theme-mode-group">
+                                    <button type="button" class="btn btn-secondary theme-mode-btn" id="theme-mode-system" onclick="setThemeMode('system', true)" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:9px 10px;font-size:.82rem;min-height:42px;">
+                                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                        <span>System</span>
+                                    </button>
+                                    <button type="button" class="btn btn-secondary theme-mode-btn" id="theme-mode-light" onclick="setThemeMode('light', true)" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:9px 10px;font-size:.82rem;min-height:42px;">
+                                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                                        <span>Light</span>
+                                    </button>
+                                    <button type="button" class="btn btn-secondary theme-mode-btn" id="theme-mode-dark" onclick="setThemeMode('dark', true)" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:9px 10px;font-size:.82rem;min-height:42px;">
+                                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                                        <span>Dark</span>
+                                    </button>
+                                </div>
                             </div>
-                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+
+                            <!-- 2. CURATED PRESETS -->
+                            <div style="margin-bottom:16px;">
+                                <label class="form-label" style="margin-bottom:6px;">Theme Presets</label>
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="applyPreset('white')" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;min-height:38px;">
+                                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#ffffff;border:1px solid #cbd5e1;flex-shrink:0;"></span> <span>Clean White</span>
+                                    </button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="applyPreset('midnight')" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;min-height:38px;">
+                                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#0a1628;border:1px solid #334155;flex-shrink:0;"></span> <span>Midnight Navy</span>
+                                    </button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="applyPreset('emerald')" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;min-height:38px;">
+                                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#10b981;flex-shrink:0;"></span> <span>Emerald Forest</span>
+                                    </button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="applyPreset('sapphire')" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;min-height:38px;">
+                                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#3b82f6;flex-shrink:0;"></span> <span>Royal Sapphire</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- 3. CUSTOM COLOR PICKERS -->
+                            <div style="margin-bottom:14px;">
+                                <label class="form-label" style="margin-bottom:6px;">Custom Colors</label>
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
+                                    <div class="form-group" style="margin-bottom:0;"><label class="form-label" style="font-size:.72rem;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Background</label><input type="color" class="form-input" id="theme-bg-inp" style="height:38px;padding:3px;cursor:pointer;width:100%;" oninput="previewSystemTheme()" /></div>
+                                    <div class="form-group" style="margin-bottom:0;"><label class="form-label" style="font-size:.72rem;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Surface</label><input type="color" class="form-input" id="theme-surface-inp" style="height:38px;padding:3px;cursor:pointer;width:100%;" oninput="previewSystemTheme()" /></div>
+                                    <div class="form-group" style="margin-bottom:0;"><label class="form-label" style="font-size:.72rem;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Text</label><input type="color" class="form-input" id="theme-text-inp" style="height:38px;padding:3px;cursor:pointer;width:100%;" oninput="previewSystemTheme()" /></div>
+                                    <div class="form-group" style="margin-bottom:0;"><label class="form-label" style="font-size:.72rem;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Accent</label><input type="color" class="form-input" id="theme-accent-inp" style="height:38px;padding:3px;cursor:pointer;width:100%;" oninput="previewSystemTheme()" /></div>
+                                </div>
+                            </div>
+
+                            <!-- 4. TYPOGRAPHY & TEXT SIZE -->
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px;">
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label class="form-label">Font</label>
-                                    <select class="form-input" id="theme-font-inp" onchange="previewSystemTheme()">
+                                    <select class="form-input" id="theme-font-inp" onchange="previewSystemTheme()" style="min-height:38px;">
                                         <option value="'Inter', sans-serif">Inter (Default)</option>
                                         <option value="'Poppins', sans-serif">Poppins</option>
                                         <option value="'Sora', sans-serif">Sora</option>
@@ -17263,17 +17375,25 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label class="form-label">Text Size</label>
-                                    <select class="form-input" id="theme-fontsize-inp" onchange="previewSystemTheme()">
-                                        <option value="87.5">Small</option>
-                                        <option value="100">Medium (Default)</option>
-                                        <option value="112.5">Large</option>
-                                        <option value="125">Extra Large</option>
+                                    <select class="form-input" id="theme-fontsize-inp" onchange="previewSystemTheme()" style="min-height:38px;">
+                                        <option value="87.5">Small (87.5%)</option>
+                                        <option value="100">Medium (100% Default)</option>
+                                        <option value="112.5">Large (112.5%)</option>
+                                        <option value="125">Extra Large (125%)</option>
                                     </select>
                                 </div>
                             </div>
-                            <div style="display:flex;gap:8px;">
-                                <button class="btn btn-primary" style="flex:1;" onclick="saveSystemTheme()">Save Theme</button>
-                                <button class="btn btn-secondary" style="flex:1;" onclick="resetSystemTheme()">Reset to Default</button>
+
+                            <!-- 5. ACTIONS -->
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button type="button" class="btn btn-primary" style="flex:1;min-width:130px;min-height:42px;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="saveSystemTheme()">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                                    <span>Save Theme</span>
+                                </button>
+                                <button type="button" class="btn btn-secondary" style="flex:1;min-width:130px;min-height:42px;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="resetSystemTheme()">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                    <span>Reset to Default</span>
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -17746,41 +17866,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 }
             }
 
-            // ── LIGHT/DARK APP THEME ──
-            // Toggles the html.theme-light class (see the CSS override block
-            // near --nav in the <style>), persists the choice in
-            // localStorage so it survives reloads and applies instantly on
-            // next page load (see the tiny inline script in <head>), and
-            // keeps every "current theme" UI control in sync — the nav icon
-            // button plus the Settings → Appearance switch, if present on
-            // this page.
-            function applyTheme(theme, persist) {
-                const isLight = theme === 'light';
-                document.documentElement.classList.toggle('theme-light', isLight);
-                if (persist) localStorage.setItem('pos_theme', isLight ? 'light' : 'dark');
-
-                const navBtn = document.getElementById('theme-toggle-btn');
-                if (navBtn) {
-                    navBtn.textContent = isLight ? '☀️' : '🌙';
-                    navBtn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
-                }
-                const settingsToggle = document.getElementById('appearance-theme-toggle');
-                if (settingsToggle) settingsToggle.checked = isLight;
-                const settingsLabel = document.getElementById('appearance-theme-label');
-                if (settingsLabel) settingsLabel.textContent = isLight ? 'Light mode' : 'Dark mode';
-            }
-
-            function toggleTheme() {
-                const nowLight = !document.documentElement.classList.contains('theme-light');
-                applyTheme(nowLight ? 'light' : 'dark', true);
-            }
-
-            // Sync every theme control to whatever the inline <head> script
-            // already applied before paint (it only adds the CSS class —
-            // it doesn't know about these UI controls, which don't exist
-            // yet at that point in <head>).
-            applyTheme(document.documentElement.classList.contains('theme-light') ? 'light' : 'dark', false);
-
+            
             // ── MODALS ──
 
 
@@ -17971,22 +18057,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             let VAT_RATE = 0;
             let TAX_RATE = 0;
 
-            function setAppCurrency(c) {
-                if (!c || c === 'PHP' || (typeof c === 'string' && c.includes('?'))) {
-                    CUR = '₱';
-                } else {
-                    CUR = c;
-                }
-            }
-
             function fmt(n) {
-                const val = parseFloat(n || 0);
-                return CUR + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            }
-
-            function fmtQty(n) {
-                const val = parseFloat(n || 0);
-                return Number.isInteger(val) ? val.toLocaleString('en-US') : val.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+                return CUR + parseFloat(n || 0).toFixed(2);
             }
 
             // A product photo's DB record can outlive the actual file on disk (e.g. an
@@ -18321,14 +18393,10 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             function openShiftCloseModal(loggingOut) {
                 apiGet('check_cash_float').then(r => {
-                    if (!r?.success || !r.data?.initialized) {
+                    if (!r?.success || !r.data.initialized) {
                         if (loggingOut) {
                             performLogout();
-                        } else {
-                            if (confirm('No active shift is currently open. Would you like to log out now?')) {
-                                performLogout();
-                            }
-                        }
+                        } else toast('No active shift to close', 'warning');
                         return;
                     }
                     shiftMode = 'close';
@@ -18350,10 +18418,6 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     // 7-Eleven flow: Cash drawer kicks open automatically for end of shift cash count
                     triggerShiftDrawerKick();
                     toast('Cash drawer released — begin your closing count', 'default');
-                }).catch(() => {
-                    if (confirm('No active shift is currently open. Would you like to log out now?')) {
-                        performLogout();
-                    }
                 });
             }
 
@@ -18367,7 +18431,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             // Nav End Shift button
             function requestEndShift() {
-                openShiftCloseModal(true);
+                openShiftCloseModal(false);
             }
 
             // Intercepts the Logout link — forces a closing cash count first if a shift is open
@@ -18446,7 +18510,11 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     receiptPrintScript() +
                     '</body></html>';
 
-                executeUniversalReceiptPrint(slipHtml);
+                const win = window.open('', '_blank', 'width=380,height=550');
+                if (win) {
+                    win.document.write(slipHtml);
+                    win.document.close();
+                }
             }
 
             function submitShiftModal() {
@@ -18500,13 +18568,6 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     }).then(async r => {
                         setLoading(btn, false);
                         if (!r?.success) {
-                            if (r?.error && (r.error.includes('already closed') || r.error.includes('already closed successfully'))) {
-                                toast('Shift already closed. Logging out...', 'info');
-                                triggerShiftDrawerKick();
-                                closeModal('shift-modal');
-                                setTimeout(performLogout, 800);
-                                return;
-                            }
                             toast(r?.error || 'Could not close shift', 'error');
                             return;
                         }
@@ -18514,31 +18575,13 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         triggerShiftDrawerKick();
                         closeModal('shift-modal');
 
-                        let logoutDone = false;
-                        const finalizeLogout = () => {
-                            if (logoutDone) return;
-                            logoutDone = true;
-                            performLogout();
-                        };
-
-                        window.__posReceiptCallback = finalizeLogout;
-
                         // 7-Eleven flow: Print End of Shift Z-Reading Summary
-                        if (r.data) {
-                            toast('Shift closed! Printing Z-Reading Summary...', 'info');
-                            printShiftReceipt(r.data).then(printedNative => {
-                                if (printedNative) {
-                                    setTimeout(finalizeLogout, 1500);
-                                }
-                            }).catch(() => {});
-                        }
+                        await printShiftReceipt(r.data);
 
-                        // Generous safety timer: if the cashier cancels or completes the print dialog, logout after 8s
-                        setTimeout(finalizeLogout, 8000);
-                    }).catch(err => {
-                        setLoading(btn, false);
-                        toast('Connection notice: Logging out...', 'info');
-                        setTimeout(performLogout, 1000);
+                        // Wipe session only after the receipt has been handed to the printer
+                        setTimeout(() => {
+                            performLogout();
+                        }, 1200);
                     });
                 }
             }
@@ -18587,33 +18630,15 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             function receiptPrintScript() {
                 return '<script>' +
-                    'var __didPrint=false;' +
-                    'function cleanup(){' +
-                    '  setTimeout(function(){' +
-                    '    try{ if(window.frameElement) window.frameElement.remove(); }catch(e){}' +
-                    '    try{ if(!window.frameElement) window.close(); }catch(e){}' +
-                    '    try{ if(window.parent && typeof window.parent.__posReceiptCallback==="function") window.parent.__posReceiptCallback(); }catch(e){}' +
-                    '    try{ if(window.opener && typeof window.opener.__posReceiptCallback==="function") window.opener.__posReceiptCallback(); }catch(e){}' +
-                    '  }, 450);' +
-                    '}' +
+                    'var __didPrint = false;' +
                     'function doPrint(){' +
-                    '  if(__didPrint)return;' +
-                    '  __didPrint=true;' +
-                    '  try{' +
-                    '    window.focus();' +
-                    '    window.onafterprint=cleanup;' +
-                    '    window.print();' +
-                    '  }catch(e){}' +
-                    '  try{' +
-                    '    var mql=window.matchMedia("print");' +
-                    '    var _handled=false;' +
-                    '    function mqHandler(e){if(!e.matches && !_handled){_handled=true;mql.removeListener(mqHandler);cleanup();}}' +
-                    '    mql.addListener(mqHandler);' +
-                    '  }catch(e){}' +
-                    '  setTimeout(cleanup,8000);' +
+                    '  if (__didPrint) return;' +
+                    '  __didPrint = true;' +
+                    '  try{ window.focus(); window.print(); }catch(e){}' +
+                    '  window.onafterprint = function(){ setTimeout(function(){ try{window.close();}catch(e){} }, 300); };' +
                     '}' +
-                    'if(document.readyState==="complete"){setTimeout(doPrint,120);}' +
-                    'else{window.addEventListener("load",function(){setTimeout(doPrint,120);});}' +
+                    'if (document.readyState === "complete") { setTimeout(doPrint, 100); }' +
+                    'else { window.addEventListener("load", function(){ setTimeout(doPrint, 100); }); }' +
                     '<\/script>';
             }
 
@@ -18664,11 +18689,16 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     const nativeOk = await tryNativePrintAgent(nativePayload);
                     if (nativeOk) {
                         toast('Shift summary Z-Read printed directly to thermal printer', 'success');
-                        return true;
+                        return;
                     }
                 } catch (e) {}
 
-                // 2. Fallback to universal browser thermal print if native agent is offline
+                // 2. Fallback to browser popup if native agent is offline
+                const win = window.open('', '_blank', 'width=380,height=650');
+                if (!win) {
+                    toast('Pop-up blocked — allow pop-ups to print the Z-Read receipt', 'warning');
+                    return;
+                }
                 const label = d.variance < 0 ? 'SHORT' : (d.variance > 0 ? 'OVER' : 'EXACT');
                 const varColor = d.variance < 0 ? '#e5484d' : (d.variance > 0 ? '#3ba55c' : '#1A1208');
                 const esc = receiptEsc;
@@ -18712,7 +18742,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     voidAuditRows :
                     '';
 
-                const zReceiptHtml = '<!DOCTYPE html><html><head><style>' +
+                win.document.write(
+                    '<!DOCTYPE html><html><head><style>' +
                     receiptBaseCSS() +
                     '.var-row{font-weight:800;color:' + varColor + ';font-size:13px;}' +
                     '</style></head><body>' +
@@ -18745,9 +18776,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     receiptFooterHTML(['Generated ' + fmtDate(new Date().toISOString()), 'Thank you — session closed.']) +
                     '</div>' +
                     receiptPrintScript() +
-                    '</body></html>';
-                executeUniversalReceiptPrint(zReceiptHtml);
-                return false;
+                    '</body></html>'
+                );
+                win.document.close();
             }
 
             // ── IMAGE HELPERS ──
@@ -18781,10 +18812,17 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             // ── LOADING BUTTON ──
             function setLoading(btn, on) {
                 if (!btn) return;
+                clearTimeout(btn._slowTimer);
                 if (on) {
                     btn.dataset.orig = btn.innerHTML;
                     btn.innerHTML = '<span class="spinner"></span>';
                     btn.disabled = true;
+                    // If a save is still going after 6s, say so — a bare spinner with no
+                    // change for that long reads as "frozen" on slow/free hosting, which is
+                    // exactly what prompted people to tap Save again or give up.
+                    btn._slowTimer = setTimeout(() => {
+                        if (btn.disabled) btn.innerHTML = '<span class="spinner"></span> <span style="font-size:.72rem;">still working…</span>';
+                    }, 6000);
                 } else {
                     btn.innerHTML = btn.dataset.orig || btn.innerHTML;
                     btn.disabled = false;
@@ -19046,15 +19084,13 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 const h = new Date().getHours();
                 document.getElementById('greet').textContent = h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : 'Evening';
                 apiGet('get_settings').then(s => {
-                    setAppCurrency(s?.data?.currency);
+                    CUR = s?.data?.currency || '₱';
                     VAT_RATE = Math.max(0, parseFloat(s?.data?.vat_rate || 0));
                     TAX_RATE = Math.max(0, parseFloat(s?.data?.tax_rate || 0));
                     const rawName = s?.data?.shop_name;
                     const finalShopName = rawName && rawName !== 'PANGGA STORE' && rawName !== 'PANGGA POS' && rawName !== 'POS SYSTEM' ? rawName : 'ProCast';
                     document.getElementById('shop-name').textContent = finalShopName;
                     updateCartUI();
-                    if (dashStatsData) renderPeriodStats();
-                    if (typeof allProds !== 'undefined' && Array.isArray(allProds) && allProds.length) renderGrid();
                 });
                 loadStats();
                 loadAllProds();
@@ -19141,7 +19177,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 const txKey = { today: 'today_sales', week: 'week_sales', month: 'month_sales', all: 'total_tx' }[dashPeriod];
                 const label = { today: "today's", week: '7-day', month: '30-day', all: 'all-time' }[dashPeriod];
                 document.getElementById('s-week').textContent = fmt(d[revKey]);
-                document.getElementById('s-week-label').textContent = label + ' revenue · ' + fmtQty(d[txKey] || 0) + ' orders';
+                document.getElementById('s-week-label').textContent = label + ' revenue · ' + (d[txKey] || 0) + ' orders';
                 document.getElementById('s-profit').textContent = fmt(d[profitKey]);
                 document.getElementById('s-profit-label').textContent = label + ' profit';
             }
@@ -19159,9 +19195,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     const d = r.data;
                     dashStatsData = d;
                     document.getElementById('s-today-rev').textContent = fmt(d.today_revenue);
-                    document.getElementById('s-today-cnt').textContent = fmtQty(d.today_sales) + ' transactions';
-                    document.getElementById('s-prods').textContent = fmtQty(d.product_count);
-                    document.getElementById('s-lowstock').textContent = fmtQty(d.low_stock) + ' low stock';
+                    document.getElementById('s-today-cnt').textContent = d.today_sales + ' transactions';
+                    document.getElementById('s-prods').textContent = d.product_count;
+                    document.getElementById('s-lowstock').textContent = d.low_stock + ' low stock';
                     renderDashPeriodButtons();
                     renderPeriodStats();
                 });
@@ -19312,61 +19348,6 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     '</div>';
                 }).join('');
                 box.style.display = 'block';
-            }
-
-            function onDashSearchKeyDown(e) {
-                if (e.key === 'Enter') {
-                    const inp = e.target;
-                    const val = (inp?.value || '').trim();
-                    if (!val) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-
-                    const scanFn = window.routeHIDScan || window.triggerHIDScan || (typeof routeHIDScan === 'function' ? routeHIDScan : null);
-
-                    // 1. Direct barcode match in local product list
-                    const prods = Array.isArray(allProds) && allProds.length ? allProds : [];
-                    const bcMatch = prods.find(p => 
-                        String(p.barcode || '').trim().toLowerCase() === val.toLowerCase() ||
-                        String(p.pack_barcode || '').trim().toLowerCase() === val.toLowerCase() ||
-                        String(p.case_barcode || '').trim().toLowerCase() === val.toLowerCase()
-                    );
-                    if (bcMatch) {
-                        inp.value = '';
-                        filterProds();
-                        hideDashSearchSuggestSoon();
-                        if (typeof scanFn === 'function') {
-                            scanFn(bcMatch.barcode || val);
-                        } else {
-                            addToCart(bcMatch.id, 1);
-                            const cartModalEl = document.getElementById('cart-modal');
-                            if (cartModalEl && !cartModalEl.classList.contains('open')) openModal('cart-modal');
-                        }
-                        return;
-                    }
-
-                    // 2. Barcode pattern (at least 3 alphanumeric/hyphen characters)
-                    if (/^[a-zA-Z0-9_\-\.]{3,}$/.test(val)) {
-                        inp.value = '';
-                        filterProds();
-                        hideDashSearchSuggestSoon();
-                        if (typeof scanFn === 'function') {
-                            scanFn(val);
-                        }
-                        return;
-                    }
-
-                    // 3. Fallback: single item search match
-                    const matches = getProductSuggestions(prods, val, 2);
-                    if (matches && matches.length === 1) {
-                        inp.value = '';
-                        filterProds();
-                        hideDashSearchSuggestSoon();
-                        addToCart(matches[0].id, 1);
-                        const cartModalEl = document.getElementById('cart-modal');
-                        if (cartModalEl && !cartModalEl.classList.contains('open')) openModal('cart-modal');
-                    }
-                }
             }
 
             document.addEventListener('click', function(e) {
@@ -19641,11 +19622,43 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     }
                 }
                 if (remaining > 0) {
-                    subtotal += remaining * price;
-                    parts.push({
-                        unit: 'piece',
-                        count: remaining
-                    });
+                    if (item.manual_discount) {
+                        const md = item.manual_discount;
+                        const discQty = Math.min(remaining, Math.max(1, parseInt(md.qty) || remaining));
+                        const basePrice = item.catalog_price ?? item.regular_price ?? price;
+                        const discPrice = md.discounted_price ?? price;
+                        const regularQty = remaining - discQty;
+
+                        subtotal += (discQty * discPrice) + (regularQty * basePrice);
+
+                        if (discQty < remaining) {
+                            parts.push({
+                                unit: 'piece',
+                                count: discQty,
+                                is_discount: true,
+                                price: discPrice
+                            });
+                            parts.push({
+                                unit: 'piece',
+                                count: regularQty,
+                                is_discount: false,
+                                price: basePrice
+                            });
+                        } else {
+                            parts.push({
+                                unit: 'piece',
+                                count: remaining,
+                                is_discount: true,
+                                price: discPrice
+                            });
+                        }
+                    } else {
+                        subtotal += remaining * price;
+                        parts.push({
+                            unit: 'piece',
+                            count: remaining
+                        });
+                    }
                 }
 
                 const breakdownText = parts.length > 1 ?
@@ -19669,7 +19682,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
 
             function addToCart(pid, qtyOverride, explicitSource) {
                 const p = allProds.find(x => x.id == pid);
-                if (!p) return false;
+                if (!p) return;
 
                 const privileged = isOwnerOrAdmin();
                 let source = 'store';
@@ -19690,7 +19703,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 const maxStock = (source === 'warehouse') ? (parseInt(p.warehouse_quantity) || 0) : (parseInt(p.quantity) || 0);
                 if (maxStock <= 0) {
                     toast('Out of ' + (source === 'warehouse' ? 'warehouse' : 'store') + ' stock!', 'error');
-                    return false;
+                    return;
                 }
 
                 const addQty = Math.max(1, parseInt(qtyOverride) || 1);
@@ -19698,13 +19711,13 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 if (ex) {
                     if (ex.qty + addQty > maxStock) {
                         toast('Not enough ' + (source === 'warehouse' ? 'warehouse' : 'store') + ' stock! (Max: ' + maxStock + ')', 'warning');
-                        return false;
+                        return;
                     }
                     ex.qty += addQty;
                 } else {
                     if (addQty > maxStock) {
                         toast('Not enough ' + (source === 'warehouse' ? 'warehouse' : 'store') + ' stock! (Max: ' + maxStock + ')', 'warning');
-                        return false;
+                        return;
                     }
                     // Price chain per line item:
                     //   regular_price  → the shelf/catalog price, always kept as reference
@@ -19763,7 +19776,6 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         setTimeout(() => focusCartCashTendered(false), 50);
                     }
                 }
-                return true;
             }
 
             function removeFromCart(pid, stockSource) {
@@ -19787,6 +19799,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     return;
                 }
                 item.qty = Math.max(1, Math.min(nextQty, maxStock || 999));
+                if (item.manual_discount && item.manual_discount.qty > item.qty) {
+                    item.manual_discount.qty = item.qty;
+                }
                 updateCartUI();
                 const cartModal = document.getElementById('cart-modal');
                 if (!cartModal || !cartModal.classList.contains('open')) {
@@ -19811,6 +19826,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     toast('Only ' + max + ' in stock', 'warning');
                 }
                 item.qty = n;
+                if (item.manual_discount && item.manual_discount.qty > item.qty) {
+                    item.manual_discount.qty = item.qty;
+                }
                 updateCartUI();
                 const cartModal = document.getElementById('cart-modal');
                 if (!cartModal || !cartModal.classList.contains('open')) {
@@ -19879,6 +19897,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 // Piece tier: strike through the regular price whenever the charged price
                 // is lower than it — whether that's from a catalog Promo, a cashier's
                 // manual Discount, or both stacked together.
+                if (item.manual_discount && item.manual_discount.qty && item.manual_discount.qty < item.qty) {
+                    const md = item.manual_discount;
+                    const base = item.catalog_price ?? item.regular_price ?? item.price;
+                    return '<div style="font-size:.78rem;font-weight:700;color:#e74c3c;">' + fmt(md.discounted_price) + ' <span style="font-size:.65rem;color:var(--text3);font-weight:normal;">(' + md.qty + ' pc' + (md.qty !== 1 ? 's' : '') + ')</span></div>' +
+                           '<div style="font-size:.72rem;color:var(--text2);">' + fmt(base) + ' <span style="font-size:.65rem;color:var(--text3);font-weight:normal;">(' + (item.qty - md.qty) + ' pc' + ((item.qty - md.qty) !== 1 ? 's' : '') + ')</span></div>';
+                }
                 const pieceStrike = (item.regular_price && item.price < item.regular_price && bd.parts.length === 1 && bd.parts[0].unit === 'piece') ?
                     '<div style="font-size:.65rem;color:var(--text3);text-decoration:line-through;">' + fmt(item.regular_price) + '</div>' :
                     '';
@@ -19917,9 +19941,15 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 }
                 const select = document.getElementById('cd-product-select');
                 if (select) {
-                    select.innerHTML = cart.map(c =>
-                        '<option value="' + c.product_id + '">' + escapeHtml(c.name) + ' (' + c.qty + ' pc' + (c.qty !== 1 ? 's' : '') + ' @ ' + fmt(c.price) + ')' + (c.manual_discount ? ' — Discounted' : '') + '</option>'
-                    ).join('');
+                    select.innerHTML = cart.map(c => {
+                        let discTag = '';
+                        if (c.manual_discount) {
+                            const md = c.manual_discount;
+                            discTag = ' — Discounted (' + (md.qty && md.qty < c.qty ? (md.qty + '/' + c.qty + ' pcs') : 'All') + ')';
+                        }
+                        const curP = c.catalog_price ?? c.regular_price ?? c.price;
+                        return '<option value="' + c.product_id + '">' + escapeHtml(c.name) + ' (' + c.qty + ' pc' + (c.qty !== 1 ? 's' : '') + ' @ ' + fmt(curP) + ')' + discTag + '</option>';
+                    }).join('');
                     select.value = (productId != null && cart.some(c => c.product_id === productId)) ? productId : cart[0].product_id;
                 }
                 cartDiscountTargetId = select ? parseInt(select.value) : (productId ?? cart[0].product_id);
@@ -19934,20 +19964,46 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 loadCartDiscountFieldsForTarget();
             }
 
+            function setCartDiscountAllQty() {
+                const item = cart.find(c => c.product_id === cartDiscountTargetId);
+                if (!item) return;
+                const qtyInp = document.getElementById('cd-qty');
+                if (qtyInp) {
+                    qtyInp.value = item.qty;
+                    updateCartDiscountPreview();
+                }
+            }
+
             function loadCartDiscountFieldsForTarget() {
                 const item = cart.find(c => c.product_id === cartDiscountTargetId);
                 if (!item) return;
-                document.getElementById('cd-current-price').textContent = fmt(item.price);
+                const curPriceEl = document.getElementById('cd-current-price');
+                const base = item.catalog_price ?? item.regular_price ?? item.price;
+                if (curPriceEl) curPriceEl.textContent = fmt(base);
+
+                const inCartQtyEl = document.getElementById('cd-in-cart-qty');
+                const maxQtyEl = document.getElementById('cd-max-qty');
+                const qtyInp = document.getElementById('cd-qty');
+                if (inCartQtyEl) inCartQtyEl.textContent = item.qty;
+                if (maxQtyEl) maxQtyEl.textContent = item.qty;
+                if (qtyInp) {
+                    qtyInp.max = item.qty;
+                }
+
                 const removeBtn = document.getElementById('cd-remove-btn');
+                const valInp = document.getElementById('cd-value');
+                const reasonInp = document.getElementById('cd-reason');
                 if (item.manual_discount) {
                     cartDiscountType = item.manual_discount.type;
-                    document.getElementById('cd-value').value = item.manual_discount.value;
-                    document.getElementById('cd-reason').value = item.manual_discount.reason || '';
+                    if (valInp) valInp.value = item.manual_discount.value;
+                    if (qtyInp) qtyInp.value = Math.min(item.qty, Math.max(1, parseInt(item.manual_discount.qty) || item.qty));
+                    if (reasonInp) reasonInp.value = item.manual_discount.reason || '';
                     if (removeBtn) removeBtn.style.display = '';
                 } else {
                     cartDiscountType = 'percent';
-                    document.getElementById('cd-value').value = '';
-                    document.getElementById('cd-reason').value = '';
+                    if (valInp) valInp.value = '';
+                    if (qtyInp) qtyInp.value = item.qty;
+                    if (reasonInp) reasonInp.value = '';
                     if (removeBtn) removeBtn.style.display = 'none';
                 }
                 setCartDiscountType(cartDiscountType);
@@ -19985,7 +20041,35 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     preview.innerHTML = '<span style="color:var(--danger);">That doesn\'t lower the price below ' + fmt(base) + '.</span>';
                     return;
                 }
-                preview.innerHTML = 'New price: <strong style="color:#e74c3c;">' + fmt(newPrice) + '</strong> <span style="color:var(--text3);text-decoration:line-through;">' + fmt(base) + '</span> / piece';
+
+                const inCartQty = item.qty || 1;
+                let discQty = parseInt(document.getElementById('cd-qty')?.value);
+                if (isNaN(discQty) || discQty < 1) discQty = inCartQty;
+                discQty = Math.min(inCartQty, discQty);
+
+                const regQty = inCartQty - discQty;
+                const totalSubtotal = (discQty * newPrice) + (regQty * base);
+                const regTotal = inCartQty * base;
+                const savings = regTotal - totalSubtotal;
+
+                if (discQty < inCartQty) {
+                    preview.innerHTML = 
+                        '<div style="font-size:.84rem;"><strong>' + discQty + ' pc' + (discQty !== 1 ? 's' : '') + '</strong> @ <strong style="color:#e74c3c;">' + fmt(newPrice) + '</strong> <span style="color:var(--text3);text-decoration:line-through;">' + fmt(base) + '</span></div>' +
+                        '<div style="font-size:.78rem;color:var(--text3);margin-top:2px;">' + regQty + ' pc' + (regQty !== 1 ? 's' : '') + ' at regular ' + fmt(base) + '</div>' +
+                        '<div style="margin-top:6px;padding-top:5px;border-top:1px dashed var(--border);font-weight:700;">' +
+                        'Line Total: <strong style="color:var(--accent);">' + fmt(totalSubtotal) + '</strong> ' +
+                        '<span style="font-size:.75rem;color:var(--text3);text-decoration:line-through;">' + fmt(regTotal) + '</span> ' +
+                        '<span style="color:var(--green,#10b981);font-size:.78rem;">(Save ' + fmt(savings) + ')</span>' +
+                        '</div>';
+                } else {
+                    preview.innerHTML = 
+                        '<div style="font-size:.84rem;">All ' + inCartQty + ' pcs @ <strong style="color:#e74c3c;">' + fmt(newPrice) + '</strong> <span style="color:var(--text3);text-decoration:line-through;">' + fmt(base) + '</span> / pc</div>' +
+                        '<div style="margin-top:6px;padding-top:5px;border-top:1px dashed var(--border);font-weight:700;">' +
+                        'Line Total: <strong style="color:var(--accent);">' + fmt(totalSubtotal) + '</strong> ' +
+                        '<span style="font-size:.75rem;color:var(--text3);text-decoration:line-through;">' + fmt(regTotal) + '</span> ' +
+                        '<span style="color:var(--green,#10b981);font-size:.78rem;">(Save ' + fmt(savings) + ')</span>' +
+                        '</div>';
+                }
             }
 
             function applyCartDiscount() {
@@ -20004,16 +20088,26 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     toast('Discount must lower the price', 'error');
                     return;
                 }
+
+                const inCartQty = item.qty || 1;
+                let discQty = parseInt(document.getElementById('cd-qty')?.value);
+                if (isNaN(discQty) || discQty < 1) discQty = inCartQty;
+                discQty = Math.min(inCartQty, discQty);
+
                 const reason = document.getElementById('cd-reason')?.value.trim() || '';
                 item.manual_discount = {
                     type: cartDiscountType,
                     value: val,
+                    qty: discQty,
+                    discounted_price: newPrice,
+                    base_price: base,
                     reason
                 };
                 item.price = newPrice;
                 closeModal('cart-discount-modal');
                 updateCartUI();
-                toast('Discount applied to ' + item.name, 'success');
+                const qtyText = discQty < inCartQty ? (' on ' + discQty + ' of ' + inCartQty + ' pcs') : '';
+                toast('Discount applied to ' + item.name + qtyText, 'success');
             }
 
             function removeCartDiscount() {
@@ -20104,7 +20198,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 if (item.manual_discount) {
                     const md = item.manual_discount;
                     const tagLabel = md.type === 'percent' ? md.value + '% OFF' : fmt(md.value) + ' OFF';
-                    metaParts.push('<span style="color:#e74c3c;font-weight:700;">DISCOUNT (' + tagLabel + ')' + (md.reason ? ' — ' + escapeHtml(md.reason) : '') + '</span>');
+                    const qtyLabel = (md.qty && md.qty < item.qty) ? ' on ' + md.qty + ' pc' + (md.qty !== 1 ? 's' : '') : '';
+                    metaParts.push('<span style="color:#e74c3c;font-weight:700;">DISCOUNT (' + tagLabel + qtyLabel + ')' + (md.reason ? ' — ' + escapeHtml(md.reason) : '') + '</span>');
                 } else if (item.is_promo) {
                     metaParts.push('<span style="color:#e74c3c;font-weight:700;">PROMO</span>');
                 }
@@ -20365,10 +20460,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 }
             }
 
-            let _paymentInProgress = false;
             function processPayment() {
                 if (!cart.length) return;
-                if (_paymentInProgress) return;
                 const btn = document.getElementById('pay-btn');
                 const totals = cartTotals();
                 const total = totals.total;
@@ -20378,8 +20471,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     toast('Insufficient cash!', 'error');
                     return;
                 }
-                _paymentInProgress = true;
-                if (btn) { btn.dataset.orig = btn.innerHTML; btn.innerHTML = '<span class="spinner"></span>'; btn.disabled = true; }
+                setLoading(btn, true);
                 // The backend stores subtotal as price*qty, so we send the *effective*
                 // blended unit price (smart subtotal ÷ qty) rather than the plain piece
                 // price — that keeps recorded revenue correct even when part of the
@@ -20407,8 +20499,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     change: chg
                 };
                 apiPost('add_transaction', txPayload).then(r => {
-                    _paymentInProgress = false;
-                    if (btn) { btn.innerHTML = btn.dataset.orig || 'Process Payment'; btn.disabled = false; }
+                    setLoading(btn, false);
 
                     // Real server-side rejection (e.g. stock validation) — NOT a connectivity
                     // issue, so the sale must not be queued or completed; let the cashier fix
@@ -20487,99 +20578,11 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             // full receipt in a dedicated window — see printSaleReceipt() below.
             let lastReceiptData = null;
 
-            // ── PLATFORM & HARDWARE PRINT HELPERS (WINDOWS 11 / PWA AWARE) ──
-            function isWindowsPlatform() {
-                if (navigator.userAgentData?.platform) {
-                    if (/windows/i.test(navigator.userAgentData.platform)) return true;
-                }
-                const ua = navigator.userAgent || '';
-                const plat = navigator.platform || '';
-                return /Windows|Win32|Win64|WOW64/i.test(ua) || /Win/i.test(plat);
-            }
-
-            function isMobilePlatform() {
-                if (navigator.userAgentData?.mobile) return true;
-                const ua = navigator.userAgent || '';
-                return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-            }
-
-            // Universal high-reliability thermal receipt printer engine:
-            // Creates a fresh, clean isolated browsing context per print job to prevent Chromium iframe caching/freeze.
-            window.__posReceiptCallback = function() {
-                try {
-                    dismissSuccessModal();
-                } catch (e) {}
-            };
-
-            function openReceiptPrintPopup(fullReceiptHtml) {
-                try {
-                    const pw = window.open('', '_blank', 'width=380,height=640,toolbar=0,scrollbars=1,status=0,menubar=0,location=0');
-                    if (pw) {
-                        pw.document.open();
-                        pw.document.write(fullReceiptHtml);
-                        pw.document.close();
-                        setTimeout(() => {
-                            try {
-                                pw.focus();
-                                pw.print();
-                            } catch(e) {}
-                        }, 250);
-                        return true;
-                    }
-                } catch (e) {
-                    console.warn('[POS Print] Popup blocked:', e);
-                }
-                return false;
-            }
-
-            function executeUniversalReceiptPrint(fullReceiptHtml) {
-                const oldFrame = document.getElementById('receipt-print-frame');
-                if (oldFrame) { try { oldFrame.remove(); } catch(e) {} }
-
-                try {
-                    const printFrame = document.createElement('iframe');
-                    printFrame.id = 'receipt-print-frame';
-                    // Must be rendered in the document tree with dimensions for Chromium to execute print()
-                    printFrame.style.cssText = 'position:fixed;bottom:0;right:0;width:320px;height:240px;border:none;visibility:hidden;z-index:-1;';
-                    document.body.appendChild(printFrame);
-
-                    const frameDoc = printFrame.contentDocument || printFrame.contentWindow?.document;
-                    if (frameDoc) {
-                        frameDoc.open();
-                        frameDoc.write(fullReceiptHtml);
-                        frameDoc.close();
-
-                        setTimeout(() => {
-                            try {
-                                const fw = printFrame.contentWindow;
-                                if (fw) {
-                                    fw.focus();
-                                    fw.print();
-                                }
-                            } catch (e) {
-                                console.warn('[POS Print] iframe print failed, falling back to popup:', e);
-                                openReceiptPrintPopup(fullReceiptHtml);
-                            }
-                            setTimeout(() => { try { printFrame.remove(); } catch(e) {} }, 10000);
-                        }, 280);
-                        return;
-                    }
-                } catch (e) {
-                    console.warn('[POS Print] iframe setup failed:', e);
-                }
-
-                // Popup fallback
-                const popSuccess = openReceiptPrintPopup(fullReceiptHtml);
-                if (!popSuccess) {
-                    toast('Printer: Please allow popups for automatic receipt printing', 'warning');
-                }
-            }
-
             // ── NATIVE THERMAL PRINT AGENT & CASH DRAWER HELPERS ──
             async function tryNativePrintAgent(payload) {
                 try {
                     const ctrl = new AbortController();
-                    const timer = setTimeout(() => ctrl.abort(), 3000);
+                    const timer = setTimeout(() => ctrl.abort(), 1200);
                     const res = await fetch('http://127.0.0.1:9100/print', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -20598,7 +20601,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             async function tryNativeDrawerKick() {
                 try {
                     const ctrl = new AbortController();
-                    const timer = setTimeout(() => ctrl.abort(), 1500);
+                    const timer = setTimeout(() => ctrl.abort(), 1000);
                     const res = await fetch('http://127.0.0.1:9100/drawer', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -20664,34 +20667,24 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     change: d.change
                 };
 
-                let nativePrinted = false;
-                try {
-                    nativePrinted = await tryNativePrintAgent(agentPayload);
-                } catch (e) {
-                    nativePrinted = false;
-                }
-
+                const nativePrinted = await tryNativePrintAgent(agentPayload);
                 if (nativePrinted) {
                     toast('Receipt printed silently via Native Thermal Print Agent', 'success');
                     return;
                 }
 
-                // If native print agent is unreachable (e.g. online HTTPS cloud blocking mixed content,
-                // or agent not started), automatically fall back to browser thermal print on Windows 11 / Windows desktop:
-                // - In Chrome Kiosk mode (--kiosk-printing): prints 100% silently with 0 clicks!
-                // - In standard Windows 11 Chrome / Edge / Desktop PWA: instantly triggers the native print dialog.
-                // Mobile platforms (Android/iOS) skip auto-trigger to avoid mobile viewport reflows, unless tapped manually.
-                const isWindows = isWindowsPlatform();
-                const isMobile = isMobilePlatform();
-                const shouldAutoPrint = isManual || isWindows || !isMobile;
-
-                if (!shouldAutoPrint) {
+                // If native print agent is unreachable (e.g. mobile phone, tablet, or browser client)
+                // and this was an automatic checkout trigger (isManual === false),
+                // DO NOT trigger the fallback browser window.print() iframe!
+                // On mobile PWA / browsers, calling window.print() via hidden iframe triggers the OS print
+                // spooler/preview, violently flickering the screen, causing webview reflows, and killing the auto-close timer.
+                // The cashier can still tap the "Print" button manually if they want a browser print preview.
+                if (!isManual) {
                     return;
                 }
 
-                if (isManual) {
-                    cancelSuccessModalTimer();
-                }
+                // 2. Fallback to browser print preview if native agent is unreachable AND cashier manually clicked Print
+                cancelSuccessModalTimer();
 
                 const itemRows = d.items.map(it => {
                     const bd = computeUnitBreakdown(it);
@@ -20700,12 +20693,11 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     // instead of a blended average across the whole line.
                     if (bd.parts.length > 1) {
                         return bd.parts.map((p, i) => {
-                            const unitPrice = p.unit === 'case' ? it.case_price : p.unit === 'bundle' ? it.pack_price : it.price;
+                            const unitPrice = p.price !== undefined ? p.price : (p.unit === 'case' ? it.case_price : p.unit === 'bundle' ? it.pack_price : it.price);
                             const lineTotal = p.count * unitPrice;
                             const unitLabel = p.unit === 'piece' ? ('pc' + (p.count !== 1 ? 's' : '')) : (p.unit + (p.count !== 1 ? 's' : ''));
-                            const nameCell = i === 0 ?
-                                esc(it.name) :
-                                '<span style="color:#666;">&#8618; ' + esc(it.name) + '</span>';
+                            const discLabel = p.is_discount ? ' <span style="font-size:.78em;color:#a02515;font-weight:700;">DISCOUNT</span>' : '';
+                            const nameCell = (i === 0 ? esc(it.name) : '<span style="color:#666;">&#8618; ' + esc(it.name) + '</span>') + discLabel;
                             return '<tr><td>' + p.count + ' ' + unitLabel + '</td><td>' + nameCell + '</td>' +
                                 '<td class="right">' + CUR + unitPrice.toFixed(2) + '</td>' +
                                 '<td class="right">' + CUR + lineTotal.toFixed(2) + '</td></tr>';
@@ -20734,7 +20726,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 }).join('');
 
                 const writeReceiptDoc = (barcodeImgHtml) => {
-                    const fullReceiptHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Receipt - ' + esc(cleanRef) + '</title><style>' +
+                    const fullReceiptHtml = '<!DOCTYPE html><html><head><style>' +
                         receiptBaseCSS() +
                         '</style></head><body>' +
                         '<div class="receipt-container">' +
@@ -20765,7 +20757,36 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         receiptPrintScript() +
                         '</body></html>';
 
-                    executeUniversalReceiptPrint(fullReceiptHtml);
+                    // Use hidden iframe to avoid popup blocker blocking automatic print on checkout
+                    let printFrame = document.getElementById('receipt-print-frame');
+                    if (!printFrame) {
+                        printFrame = document.createElement('iframe');
+                        printFrame.id = 'receipt-print-frame';
+                        printFrame.style.position = 'fixed';
+                        printFrame.style.right = '0';
+                        printFrame.style.bottom = '0';
+                        printFrame.style.width = '1px';
+                        printFrame.style.height = '1px';
+                        printFrame.style.opacity = '0.01';
+                        printFrame.style.border = '0';
+                        printFrame.style.pointerEvents = 'none';
+                        document.body.appendChild(printFrame);
+                    }
+
+                    try {
+                        const frameDoc = printFrame.contentWindow.document;
+                        frameDoc.open();
+                        frameDoc.write(fullReceiptHtml);
+                        frameDoc.close();
+                        // Note: receiptPrintScript inside fullReceiptHtml triggers window.print() once cleanly on load
+                    } catch (e) {
+                        // Fallback to popup window if iframe print fails
+                        const win = window.open('', '_blank', 'width=380,height=650');
+                        if (win) {
+                            win.document.write(fullReceiptHtml);
+                            win.document.close();
+                        }
+                    }
                 };
 
                 if (typeof JsBarcode === 'undefined') {
@@ -20805,8 +20826,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             function prodsInit() {
                 if (cur_page !== 'products') return;
                 apiGet('get_settings').then(s => {
-                    setAppCurrency(s?.data?.currency);
-                    if (invProds && invProds.length) renderProds();
+                    CUR = s?.data?.currency || '₱';
                 });
                 loadInvProds();
                 loadInvCats();
@@ -20892,7 +20912,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     a.name.localeCompare(b.name)
                 );
                 const countEl = document.getElementById('prod-count');
-                if (countEl) countEl.textContent = fmtQty(list.length) + ' products';
+                if (countEl) countEl.textContent = list.length + ' products';
                 const grid = document.getElementById('prod-grid');
                 if (!grid) return;
                 if (!list.length) {
@@ -20905,8 +20925,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     const img = p.has_image == 1 ? '<img src="' + prodImgUrl(p.id, p.updated_at) + '" class="product-card-img" loading="lazy" data-fallback="div" onerror="imgFallback(this)"/>' : '<div class="product-card-ph"><img src="' + DEFAULT_PRODUCT_IMG + '" class="default-prod-img" alt=""></div>';
                     const promoInfo = getPromoInfo(p);
                     const priceHTML = promoInfo.active ?
-                        '<span class="promo-strike">' + fmt(promoInfo.price) + '</span><span class="promo-now">' + fmt(promoInfo.promo) + '</span>' :
-                        fmt(p.price);
+                        '<span class="promo-strike">' + CUR + promoInfo.price.toFixed(2) + '</span><span class="promo-now">' + CUR + promoInfo.promo.toFixed(2) + '</span>' :
+                        CUR + parseFloat(p.price).toFixed(2);
                     return '<div class="product-card" onclick="openEditModal(' + p.id + ')">' +
                         img +
                         (promoInfo.active ? '<span class="sale-badge">SALE</span>' : '') +
@@ -21494,7 +21514,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 if (cur_page !== 'sales') return;
                 // Fetch settings in parallel without blocking chart & transaction loading
                 apiGet('get_settings').then(s => {
-                    setAppCurrency(s?.data?.currency);
+                    if (s?.data?.currency) CUR = s.data.currency;
                 });
                 loadTx();
                 loadSalesCharts();
@@ -21818,7 +21838,12 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     }
                 } catch (e) {}
 
-                // 2. Fallback to universal browser thermal print if native agent is offline
+                // 2. Fallback to clean browser popup if native agent is offline
+                const win = window.open('', '_blank', 'width=380,height=650');
+                if (!win) {
+                    toast('Pop-up blocked — allow pop-ups to print the void receipt', 'warning');
+                    return;
+                }
                 const dt = new Date();
                 const dateStr = String(dt.getMonth() + 1).padStart(2, '0') + '/' + String(dt.getDate()).padStart(2, '0') + '/' + dt.getFullYear();
                 let hh = dt.getHours();
@@ -21844,7 +21869,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     return html;
                 }).join('');
 
-                const voidReceiptHtml = '<!DOCTYPE html><html><head><style>' +
+                win.document.write(
+                    '<!DOCTYPE html><html><head><style>' +
                     receiptBaseCSS() +
                     '</style></head><body>' +
                     '<div class="receipt-container">' +
@@ -21871,8 +21897,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     receiptFooterHTML(['TRANSACTION VOID AUDIT SLIP', 'Please keep receipt for refund audit.']) +
                     '</div>' +
                     receiptPrintScript() +
-                    '</body></html>';
-                executeUniversalReceiptPrint(voidReceiptHtml);
+                    '</body></html>'
+                );
+                win.document.close();
             }
 
             // ── VOID ORDER WORKFLOW ("Void Order" toolbar button + Sales History "view" modal) ──
@@ -22840,7 +22867,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             function analyticsInit() {
                 if (cur_page !== 'analytics') return;
                 apiGet('get_settings').then(s => {
-                    setAppCurrency(s?.data?.currency);
+                    CUR = s?.data?.currency || '₱';
                 });
                 Promise.all([
                     apiGet('get_stats'),
@@ -22850,9 +22877,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 ]).then(([stats, top]) => {
                     if (stats?.success) {
                         const d = stats.data;
-                        document.getElementById('a-rev').textContent = fmt(d.total_revenue);
-                        document.getElementById('a-orders').textContent = fmtQty(d.total_tx);
-                        document.getElementById('a-avg').textContent = d.total_tx ? fmt(d.total_revenue / d.total_tx) : fmt(0);
+                        document.getElementById('a-rev').textContent = CUR + parseFloat(d.total_revenue).toFixed(2);
+                        document.getElementById('a-orders').textContent = d.total_tx;
+                        document.getElementById('a-avg').textContent = d.total_tx ? CUR + (d.total_revenue / d.total_tx).toFixed(2) : CUR + '0.00';
                     }
                     if (top?.success && top.data.length) document.getElementById('a-best').textContent = top.data[0].name;
 
@@ -23260,12 +23287,18 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     return;
                 }
 
-                // 2. Fallback to browser thermal print
+                // 2. Fallback to browser print window
+                const win = window.open('', '_blank', 'width=380,height=650');
+                if (!win) {
+                    hwDiagResult('Pop-up blocked — allow pop-ups for this site, then try again.', false);
+                    toast('Pop-up blocked — allow pop-ups to test print', 'warning');
+                    return;
+                }
                 const esc = receiptEsc;
                 const itemsHtml =
                     '<tr><td>2</td><td>Sample Item A</td><td class="right">' + fmt(25) + '</td><td class="right">' + fmt(50) + '</td></tr>' +
                     '<tr><td>1</td><td>Sample Item B</td><td class="right">' + fmt(75) + '</td><td class="right">' + fmt(75) + '</td></tr>';
-                const testReceiptHtml =
+                win.document.write(
                     '<!DOCTYPE html><html><head><title>Test Receipt</title><meta charset="utf-8"/><style>' +
                     receiptBaseCSS() +
                     '</style></head><body>' +
@@ -23281,8 +23314,9 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     receiptFooterHTML(['This is a diagnostic test print', 'No sale was recorded — ' + esc(new Date().toLocaleString())]) +
                     '</div>' +
                     receiptPrintScript() +
-                    '</body></html>';
-                executeUniversalReceiptPrint(testReceiptHtml);
+                    '</body></html>'
+                );
+                win.document.close();
                 hwDiagResult('Test receipt sent to browser print. If nothing came out, check the printer power/cable/paper.', true);
             }
 
@@ -23377,20 +23411,16 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             // Universal composite drawer-kick pulse:
             // 1. ESC p 0 25 250 (Pin 2 — standard Epson, Xprinter, Citizen, Munbyn, Bixolon)
             // 2. ESC p 1 25 250 (Pin 5 — alternate pin cash drawers)
-            // 3. ESC p '0' 25 250 (ASCII 0x30 for older POS-58 firmware)
-            // 4. ESC p '1' 25 250 (ASCII 0x31 for older POS-58 firmware)
-            // 5. DLE DC4 1 0 1 (Real-Time Pin 2 pulse — bypasses spooler backlog)
-            // 6. DLE DC4 1 1 1 (Real-Time Pin 5 pulse — bypasses spooler backlog)
-            // 7. ASCII 0x07 BEL (Star Micronics & legacy thermal drawers)
+            // 3. ASCII 0x07 BEL (Star Micronics receipt printers)
             // Combined, this opens 100% of cash drawers regardless of brand or pin wiring.
-            const DRAWER_KICK_ESCPOS = '\x1B\x70\x00\x19\xFA\x1B\x70\x01\x19\xFA\x1B\x70\x30\x19\xFA\x1B\x70\x31\x19\xFA\x10\x14\x01\x00\x01\x10\x14\x01\x01\x01\x07';
+            const DRAWER_KICK_ESCPOS = '\x1B\x70\x00\x19\xFA\x1B\x70\x01\x19\xFA\x07';
 
             // silent=true (used right after a real cash payment) never throws/toasts —
             // a printer being off or agent not running must NEVER block or interrupt
             // an already-completed sale. silent=false (the Settings test button) always
             // reports a clear pass/fail so a manager can actually debug the wiring.
             async function openCashDrawer(silent = false) {
-                // 1. Try POS Native Print Agent first (direct hardware pulse to thermal printer via winspool.drv)
+                // 1. Try POS Native Print Agent first (direct hardware pulse to Xprinter XP-58 via winspool.drv)
                 try {
                     const kicked = await tryNativeDrawerKick();
                     if (kicked) {
@@ -23420,29 +23450,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                             hwDiagResult('Could not open the drawer via QZ Tray: ' + reason, false);
                         }
                     }
-                }
-
-                // 3. Try Web Serial API fallback if available (USB-to-Serial / direct COM triggers)
-                if (navigator.serial) {
-                    try {
-                        const ports = await navigator.serial.getPorts();
-                        if (ports && ports.length > 0) {
-                            const port = ports[0];
-                            await port.open({ baudRate: 9600 });
-                            const writer = port.writable.getWriter();
-                            const encoder = new TextEncoder();
-                            await writer.write(encoder.encode(DRAWER_KICK_ESCPOS));
-                            writer.releaseLock();
-                            await port.close();
-                            if (!silent) hwDiagResult('Cash drawer kicked via Web Serial port!', true);
-                            return true;
-                        }
-                    } catch (serErr) {
-                        console.warn('Web Serial kick:', serErr);
-                    }
-                }
-
-                if (!silent) {
+                } else if (!silent) {
                     hwDiagResult('Could not kick cash drawer: Native Print Agent (port 9100) is not reachable, and no QZ printer is configured.', false);
                 }
                 return false;
@@ -23717,84 +23725,251 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                 });
             }
 
-            // ── SYSTEM THEME (Settings → System Theme) ──
-            // Default palette matches the built-in dark theme's own :root values
-            // exactly, so "Reset to Default" (and a first-ever visit with nothing
-            // saved yet) looks identical to the app's normal look.
-            const DEFAULT_SYSTEM_THEME = {
-                bg: '#0a1628',
-                surface: '#101f38',
-                text: '#e8eef7',
-                accent: '#2f7ff5',
-                font: "'Inter', sans-serif",
-                fontSize: 100
+
+            // ── COLLAPSIBLE CARDS CONTROLLER ──
+            function toggleCollapseCard(bodyId, toggleEl) {
+                const body = document.getElementById(bodyId);
+                if (!body) return;
+                const isHidden = window.getComputedStyle(body).display === 'none';
+                if (isHidden) {
+                    body.style.display = 'block';
+                    if (toggleEl) toggleEl.classList.add('is-open');
+                } else {
+                    body.style.display = 'none';
+                    if (toggleEl) toggleEl.classList.remove('is-open');
+                }
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+                document.querySelectorAll('.collapse-toggle').forEach(toggle => {
+                    const onclickAttr = toggle.getAttribute('onclick') || '';
+                    const match = onclickAttr.match(/toggleCollapseCard\(['"]([^'"]+)['"]/);
+                    if (match && match[1]) {
+                        const body = document.getElementById(match[1]);
+                        if (body && window.getComputedStyle(body).display !== 'none') {
+                            toggle.classList.add('is-open');
+                        }
+                    }
+                });
+            });
+
+            // ── UNIFIED SYSTEM THEME ENGINE (Settings → System Theme) ──
+            const THEME_PRESETS = {
+                white: {
+                    name: 'Clean White',
+                    mode: 'light',
+                    bg: '#f3f6fb',
+                    surface: '#ffffff',
+                    text: '#16233a',
+                    accent: '#2f7ff5'
+                },
+                midnight: {
+                    name: 'Midnight Navy',
+                    mode: 'dark',
+                    bg: '#0a1628',
+                    surface: '#101f38',
+                    text: '#e8eef7',
+                    accent: '#2f7ff5'
+                },
+                emerald: {
+                    name: 'Emerald Forest',
+                    mode: 'dark',
+                    bg: '#061a14',
+                    surface: '#0d2820',
+                    text: '#e6f4ea',
+                    accent: '#10b981'
+                },
+                sapphire: {
+                    name: 'Royal Sapphire',
+                    mode: 'dark',
+                    bg: '#081226',
+                    surface: '#0f1f3d',
+                    text: '#e1e7f5',
+                    accent: '#3b82f6'
+                }
             };
 
+            function getThemeConfig() {
+                if (window._themeConfig) return window._themeConfig;
+                let cfg = null;
+                try {
+                    cfg = JSON.parse(localStorage.getItem('pos_theme_config') || 'null');
+                } catch(e) {}
+                if (!cfg) {
+                    const legacyTheme = localStorage.getItem('pos_theme');
+                    let legacyCustom = null;
+                    try { legacyCustom = JSON.parse(localStorage.getItem('pos_custom_theme') || 'null'); } catch(e) {}
+                    cfg = {
+                        mode: legacyTheme === 'light' ? 'light' : (legacyTheme === 'dark' ? 'dark' : 'system'),
+                        custom: legacyCustom
+                    };
+                }
+                window._themeConfig = cfg;
+                return cfg;
+            }
+
+            function setThemeMode(mode, persist) {
+                const cfg = getThemeConfig();
+                cfg.mode = mode;
+                if (cfg.custom && cfg.custom.bg) {
+                    const customIsLight = window._themeUtil ? (window._themeUtil.relLuma(cfg.custom.bg) >= 0.5) : false;
+                    if (mode === 'light' && !customIsLight) {
+                        cfg.custom = null;
+                    } else if (mode === 'dark' && customIsLight) {
+                        cfg.custom = null;
+                    }
+                }
+                if (persist) {
+                    try {
+                        localStorage.setItem('pos_theme_config', JSON.stringify(cfg));
+                        localStorage.setItem('pos_theme', mode);
+                        if (!cfg.custom) localStorage.removeItem('pos_custom_theme');
+                    } catch (e) {}
+                }
+                window._themeUtil?.applyThemeConfig(cfg);
+                syncThemeControls();
+            }
+
+            function applyPreset(presetKey) {
+                const preset = THEME_PRESETS[presetKey];
+                if (!preset) return;
+                const cfg = {
+                    mode: preset.mode,
+                    custom: {
+                        bg: preset.bg,
+                        surface: preset.surface,
+                        text: preset.text,
+                        accent: preset.accent,
+                        font: document.getElementById('theme-font-inp')?.value || "'Inter', sans-serif",
+                        fontSize: parseFloat(document.getElementById('theme-fontsize-inp')?.value) || 100
+                    }
+                };
+                window._themeConfig = cfg;
+                try {
+                    localStorage.setItem('pos_theme_config', JSON.stringify(cfg));
+                    localStorage.setItem('pos_custom_theme', JSON.stringify(cfg.custom));
+                    localStorage.setItem('pos_theme', preset.mode);
+                } catch (e) {}
+                window._themeUtil?.applyThemeConfig(cfg);
+                syncThemeControls();
+                toast('Preset ' + preset.name + ' applied!', 'success');
+            }
+
+            function syncThemeControls() {
+                const cfg = getThemeConfig();
+                const mode = cfg.mode || 'system';
+
+                ['system', 'light', 'dark'].forEach(m => {
+                    const btn = document.getElementById('theme-mode-' + m);
+                    if (btn) {
+                        if (m === mode) {
+                            btn.classList.add('btn-primary');
+                            btn.classList.remove('btn-secondary');
+                        } else {
+                            btn.classList.remove('btn-primary');
+                            btn.classList.add('btn-secondary');
+                        }
+                    }
+                });
+
+                populateSystemThemeInputs();
+            }
+
             function readSystemThemeInputs() {
+                const cfg = getThemeConfig();
+                const effective = window._themeUtil?.getEffectiveMode(cfg.mode) || 'dark';
+                const isLight = effective === 'light';
+                const defaultRef = isLight ? THEME_PRESETS.white : THEME_PRESETS.midnight;
+
                 return {
-                    bg: document.getElementById('theme-bg-inp')?.value || DEFAULT_SYSTEM_THEME.bg,
-                    surface: document.getElementById('theme-surface-inp')?.value || DEFAULT_SYSTEM_THEME.surface,
-                    text: document.getElementById('theme-text-inp')?.value || DEFAULT_SYSTEM_THEME.text,
-                    accent: document.getElementById('theme-accent-inp')?.value || DEFAULT_SYSTEM_THEME.accent,
-                    font: document.getElementById('theme-font-inp')?.value || DEFAULT_SYSTEM_THEME.font,
+                    bg: document.getElementById('theme-bg-inp')?.value || defaultRef.bg,
+                    surface: document.getElementById('theme-surface-inp')?.value || defaultRef.surface,
+                    text: document.getElementById('theme-text-inp')?.value || defaultRef.text,
+                    accent: document.getElementById('theme-accent-inp')?.value || defaultRef.accent,
+                    font: document.getElementById('theme-font-inp')?.value || "'Inter', sans-serif",
                     fontSize: parseFloat(document.getElementById('theme-fontsize-inp')?.value) || 100
                 };
             }
 
             function populateSystemThemeInputs() {
-                let saved = null;
-                try {
-                    saved = JSON.parse(localStorage.getItem('pos_custom_theme') || 'null');
-                } catch (e) {}
-                const t = saved || DEFAULT_SYSTEM_THEME;
+                const cfg = getThemeConfig();
+                const effective = window._themeUtil?.getEffectiveMode(cfg.mode) || 'dark';
+                const isLight = effective === 'light';
+                const defaultRef = isLight ? THEME_PRESETS.white : THEME_PRESETS.midnight;
+                const c = cfg.custom || defaultRef;
+
                 const bgi = document.getElementById('theme-bg-inp');
                 const sfi = document.getElementById('theme-surface-inp');
                 const txi = document.getElementById('theme-text-inp');
                 const aci = document.getElementById('theme-accent-inp');
                 const fni = document.getElementById('theme-font-inp');
                 const fsi = document.getElementById('theme-fontsize-inp');
-                if (bgi) bgi.value = t.bg;
-                if (sfi) sfi.value = t.surface;
-                if (txi) txi.value = t.text;
-                if (aci) aci.value = t.accent;
-                if (fni) fni.value = t.font;
-                if (fsi) fsi.value = String(t.fontSize);
+
+                if (bgi) bgi.value = c.bg || defaultRef.bg;
+                if (sfi) sfi.value = c.surface || defaultRef.surface;
+                if (txi) txi.value = c.text || defaultRef.text;
+                if (aci) aci.value = c.accent || defaultRef.accent;
+                if (fni) fni.value = c.font || "'Inter', sans-serif";
+                if (fsi) fsi.value = String(c.fontSize || 100);
             }
 
-            // Applies whatever's currently picked immediately, before Save is even
-            // tapped — reuses the exact same color-mixing/derivation logic the
-            // before-paint <head> script uses (window._themeUtil), so the live
-            // preview and what actually loads next time are guaranteed identical.
             function previewSystemTheme() {
-                window._themeUtil?.applyCustomThemeVars(readSystemThemeInputs());
+                const inputs = readSystemThemeInputs();
+                const cfg = getThemeConfig();
+                cfg.custom = inputs;
+                window._themeUtil?.applyThemeConfig(cfg);
             }
 
             function saveSystemTheme() {
-                const t = readSystemThemeInputs();
+                const inputs = readSystemThemeInputs();
+                const cfg = getThemeConfig();
+                cfg.custom = inputs;
+                // Auto-adapt mode to background luminance so CSS cascade matches custom colors
+                if (inputs.bg && window._themeUtil) {
+                    cfg.mode = window._themeUtil.relLuma(inputs.bg) >= 0.5 ? 'light' : 'dark';
+                }
+                // Explicitly update the in-memory config cache
+                window._themeConfig = cfg;
                 try {
-                    localStorage.setItem('pos_custom_theme', JSON.stringify(t));
+                    localStorage.setItem('pos_theme_config', JSON.stringify(cfg));
+                    localStorage.setItem('pos_custom_theme', JSON.stringify(inputs));
+                    localStorage.setItem('pos_theme', cfg.mode);
                 } catch (e) {
-                    toast('Could not save theme (browser storage unavailable)', 'error');
+                    toast('Could not save theme (storage full or blocked)', 'error');
                     return;
                 }
-                window._themeUtil?.applyCustomThemeVars(t);
+                // Apply the theme visually
+                window._themeUtil?.applyThemeConfig(cfg);
+                // Re-populate controls to reflect saved state
+                syncThemeControls();
                 toast('Theme saved!', 'success');
             }
 
             function resetSystemTheme() {
+                const cfg = {
+                    mode: 'system',
+                    custom: null
+                };
+                window._themeConfig = cfg;
                 try {
+                    localStorage.removeItem('pos_theme_config');
                     localStorage.removeItem('pos_custom_theme');
+                    localStorage.removeItem('pos_theme');
                 } catch (e) {}
-                // Clearing the inline overrides (rather than re-applying the default
-                // theme's own values) lets the normal Light/Dark toggle's stylesheet
-                // rules take back over exactly as if no custom theme was ever set.
-                const root = document.documentElement.style;
-                ['--bg', '--surface', '--surface2', '--border', '--text', '--text2', '--text3', '--accent', '--accent2', '--user-font-family']
-                .forEach(p => root.removeProperty(p));
-                document.documentElement.style.fontSize = '';
-                document.documentElement.style.colorScheme = '';
-                populateSystemThemeInputs();
+
+                window._themeUtil?.applyThemeConfig(cfg);
+                syncThemeControls();
                 toast('Theme reset to default', 'success');
+            }
+
+            function applyTheme(theme, persist) {
+                setThemeMode(theme === 'light' ? 'light' : (theme === 'dark' ? 'dark' : 'system'), persist);
+            }
+
+            function toggleTheme() {
+                const cfg = getThemeConfig();
+                const cur = window._themeUtil?.getEffectiveMode(cfg.mode) || 'dark';
+                setThemeMode(cur === 'light' ? 'dark' : 'light', true);
             }
 
             function saveMyEmail() {

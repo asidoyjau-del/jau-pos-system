@@ -38,6 +38,9 @@
    --ghost-bg-hover: rgba(255, 255, 255, .12);
    --shadow-lg: 0 24px 80px rgba(0, 0, 0, .7);
    --transition: .18s cubic-bezier(.4, 0, .2, 1);
+   --scrollbar-thumb: #334d75;
+   --scrollbar-thumb-hover: #4d70a5;
+   --scrollbar-track: rgba(10, 22, 40, .4);
 }
 
 /* ── LIGHT MODE ─────────────────────────────────────────────────────────────
@@ -79,6 +82,9 @@ html.theme-light {
    --ghost-bg: rgba(20, 40, 80, .04);
    --ghost-bg-hover: rgba(20, 40, 80, .09);
    --shadow-lg: 0 24px 80px rgba(20, 40, 80, .16);
+   --scrollbar-thumb: #b0c0d8;
+   --scrollbar-thumb-hover: #738fae;
+   --scrollbar-track: rgba(0, 0, 0, .04);
 }
 
 *,
@@ -1195,22 +1201,32 @@ textarea.form-control {
    animation: spin .8s linear infinite
 }
 
+* {
+   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+   scrollbar-width: auto;
+}
+
 ::-webkit-scrollbar {
-   width: 6px;
-   height: 6px
+   width: 12px;
+   height: 12px;
 }
 
 ::-webkit-scrollbar-track {
-   background: transparent
+   background: var(--scrollbar-track);
+   border-radius: 99px;
 }
 
 ::-webkit-scrollbar-thumb {
-   background: rgba(148, 163, 184, .2);
-   border-radius: 3px
+   background: var(--scrollbar-thumb);
+   border-radius: 99px;
+   border: 2px solid transparent;
+   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-   background: rgba(148, 163, 184, .35)
+   background: var(--scrollbar-thumb-hover);
+   border: 1px solid transparent;
+   background-clip: content-box;
 }
 
 @media(max-width:900px) {
