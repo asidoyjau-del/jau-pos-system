@@ -8576,7 +8576,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
             function applyThemeConfig(cfg) {
                 if (!isAppPage) return;
                 cfg = cfg || {};
-                var mode = cfg.mode || 'system';
+                var mode = cfg.mode || 'light';
                 var effective = getEffectiveMode(mode);
                 var isLight = effective === 'light';
 
@@ -8646,7 +8646,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     var legacyCustom = null;
                     try { legacyCustom = JSON.parse(localStorage.getItem('pos_custom_theme') || 'null'); } catch(e) {}
                     storedCfg = {
-                        mode: legacyTheme === 'light' ? 'light' : (legacyTheme === 'dark' ? 'dark' : 'system'),
+                        mode: legacyTheme === 'dark' ? 'dark' : (legacyTheme === 'system' ? 'system' : 'light'),
                         custom: legacyCustom
                     };
                 }
@@ -17215,12 +17215,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         <p class="page-sub">Configure your store</p>
                     </div>
 
-                    <label class="switch">
-                                <input type="checkbox" id="appearance-theme-toggle" onchange="applyTheme(this.checked ? 'light' : 'dark', true)" />
-                                <span class="switch-slider"></span>
-                            </label>
-                        </div>
-                    </div>
+
 
                     <div class="card" style="margin-bottom:16px;">
                         <div class="card-title collapse-toggle" onclick="toggleCollapseCard('shop-info-wrap', this)" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;">
@@ -23159,7 +23154,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     // System Theme controls populate from localStorage (this is a
                     // per-browser display preference, not a store-wide setting — see
                     // saveSystemTheme()/resetSystemTheme() below), not from server settings.
-                    populateSystemThemeInputs();
+                    syncThemeControls();
                     VAT_RATE = Math.max(0, parseFloat(s.vat_rate || 0));
                     TAX_RATE = Math.max(0, parseFloat(s.tax_rate || 0));
                     renderShopLogoPreview(s.shop_logo || '');
@@ -23800,7 +23795,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     let legacyCustom = null;
                     try { legacyCustom = JSON.parse(localStorage.getItem('pos_custom_theme') || 'null'); } catch(e) {}
                     cfg = {
-                        mode: legacyTheme === 'light' ? 'light' : (legacyTheme === 'dark' ? 'dark' : 'system'),
+                        mode: legacyTheme === 'dark' ? 'dark' : (legacyTheme === 'system' ? 'system' : 'light'),
                         custom: legacyCustom
                     };
                 }
