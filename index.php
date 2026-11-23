@@ -18608,7 +18608,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     'table.items col.qty{width:16%;} table.items col.desc{width:42%;} table.items col.price{width:21%;} table.items col.total{width:21%;}' +
                     '.total-band{background:#e4e4e4;font-weight:800;font-size:14px;padding:5px 4px;margin:5px 0;display:flex;justify-content:space-between;border-radius:2px;}' +
                     '.void-band{background:#fbe4e1;color:#C0392B;font-weight:800;font-size:12.5px;padding:5px 4px;margin:5px 0;display:flex;justify-content:space-between;border-radius:2px;}' +
-                    'tr.voided-row td{color:#C0392B;text-decoration:line-through;}' +
+                    'tr.voided-row td{color:#e5484d;font-weight:600;text-decoration:line-through;text-decoration-color:#e5484d;text-decoration-thickness:2px;}' +
+                    'tr.voided-row .void-tag{font-size:9.5px;font-weight:800;letter-spacing:.04em;background:#fee2e2;color:#ef4444;padding:1px 4px;border-radius:3px;text-decoration:none;display:inline-block;margin-left:4px;}' +
                     '.void-tag{font-size:9.5px;font-weight:800;letter-spacing:.04em;text-decoration:none;}' +
                     'h3{font-size:10.5px;letter-spacing:.06em;color:#333;margin:8px 0 3px;}' +
                     '.receipt-footer{text-align:center;margin-top:10px;font-size:11px;}' +
@@ -18620,6 +18621,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     '  .receipt-container,.receipt-container *{visibility:visible;}' +
                     '  .receipt-container{position:absolute;left:0;top:0;width:100%!important;max-width:100%!important;padding:3mm 2mm!important;margin:0!important;font-size:11.5px!important;-webkit-print-color-adjust:exact;print-color-adjust:exact;}' +
                     '  .total-band,.void-band{-webkit-print-color-adjust:exact;print-color-adjust:exact;}' +
+                    '  tr.voided-row td{-webkit-print-color-adjust:exact;print-color-adjust:exact;color:#e5484d!important;text-decoration:line-through!important;text-decoration-color:#e5484d!important;text-decoration-thickness:2px!important;}' +
                     '}';
             }
 
@@ -20645,7 +20647,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     cashier: CASHIER_NAME || 'Cashier',
                     ref: cleanRef,
                     date_time: dateStr + ' ' + timeStr,
-                    currency: CUR,
+                    currency: '',
                     items: d.items.map(it => ({
                         name: it.name,
                         qty: it.qty,
@@ -21824,7 +21826,7 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                         })),
                         voided_amount: voidAmt,
                         net_total: netTot,
-                        currency: '₱'
+                        currency: ''
                     };
                     const nativeOk = await tryNativePrintAgent(nativePayload);
                     if (nativeOk) {
@@ -21853,13 +21855,13 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     let html = '';
                     if (remaining > 0) {
                         html += '<tr><td>' + remaining + ' x</td><td>' + esc(it.product_name) + '</td>' +
-                            '<td class="right">' + CUR + parseFloat(it.price).toFixed(2) + '</td>' +
-                            '<td class="right">' + fmt(remaining * it.price) + '</td></tr>';
+                            '<td class="right">' + parseFloat(it.price).toFixed(2) + '</td>' +
+                            '<td class="right">' + (remaining * it.price).toFixed(2) + '</td></tr>';
                     }
                     if (voidedQty > 0) {
-                        html += '<tr class="voided-row"><td>' + voidedQty + ' x</td><td>' + esc(it.product_name) + ' <span class="void-tag">VOIDED</span></td>' +
-                            '<td class="right">' + CUR + parseFloat(it.price).toFixed(2) + '</td>' +
-                            '<td class="right">-' + fmt(voidedQty * it.price) + '</td></tr>';
+                        html += '<tr class="voided-row" style="text-decoration:line-through;text-decoration-color:#e5484d;text-decoration-thickness:2px;color:#e5484d;font-weight:600;"><td>' + voidedQty + ' x</td><td>' + esc(it.product_name) + ' <span class="void-tag" style="text-decoration:none;display:inline-block;background:#fee2e2;color:#ef4444;padding:1px 4px;border-radius:3px;font-size:9.5px;">VOIDED</span></td>' +
+                            '<td class="right">' + parseFloat(it.price).toFixed(2) + '</td>' +
+                            '<td class="right">-' + (voidedQty * it.price).toFixed(2) + '</td></tr>';
                     }
                     return html;
                 }).join('');
@@ -21882,8 +21884,8 @@ $seoImage = (!empty($storeSettings['shop_logo']) && strpos($storeSettings['shop_
                     '<tbody>' + itemRows + '</tbody>' +
                     '</table>' +
                     '<div class="divider"></div>' +
-                    '<div class="void-band"><span>VOIDED — REFUNDED (THIS ACTION)</span><span>-' + fmt(voidAmt) + '</span></div>' +
-                    '<div class="total-band"><span>' + (isFullVoid ? 'NEW TOTAL' : 'UPDATED TOTAL') + '</span><span>' + fmt(netTot) + '</span></div>' +
+                    '<div class="void-band"><span>VOIDED — REFUNDED (THIS ACTION)</span><span>-' + parseFloat(voidAmt).toFixed(2) + '</span></div>' +
+                    '<div class="total-band"><span>' + (isFullVoid ? 'NEW TOTAL' : 'UPDATED TOTAL') + '</span><span>' + parseFloat(netTot).toFixed(2) + '</span></div>' +
                     '<div class="divider"></div>' +
                     '<div style="margin:12px 0 6px;font-size:10.5px;text-align:center;">' +
                     'Customer Signature: _______________________<br><br>' +

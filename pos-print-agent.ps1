@@ -320,6 +320,76 @@ function Format-ReceiptLine {
 }
 
 # Helper to build ESC/POS binary data for a receipt
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+function New-EscPosStrikethroughRow {
+    param(
+        [string]$text,
+        [int]$width = 384,
+        [int]$height = 28
+    )
+
+    try {
+        $bmp = New-Object System.Drawing.Bitmap($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.Clear([System.Drawing.Color]::White)
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::SingleBitPerPixelGridFit
+
+        $font = New-Object System.Drawing.Font("Lucida Console", 11, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+        $brush = [System.Drawing.Brushes]::Black
+
+        $rect = New-Object System.Drawing.RectangleF(0, 0, $width, $height)
+        $fmt = New-Object System.Drawing.StringFormat
+        $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $fmt.Alignment = [System.Drawing.StringAlignment]::Near
+
+        $g.DrawString($text, $font, $brush, $rect, $fmt)
+
+        # Draw solid horizontal strike line right through the middle of the text
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 2)
+        $midY = [int]($height / 2)
+        $g.DrawLine($pen, 0, $midY, $width, $midY)
+
+        $pen.Dispose()
+        $font.Dispose()
+        $fmt.Dispose()
+        $g.Dispose()
+
+        # Convert to ESC/POS raster bit-image (GS v 0)
+        $bytesPerRow = [int]($width / 8)
+        $ms = New-Object System.IO.MemoryStream
+        $bw = New-Object System.IO.BinaryWriter($ms)
+
+        $xL = $bytesPerRow % 256
+        $xH = [int]($bytesPerRow / 256)
+        $yL = $height % 256
+        $yH = [int]($height / 256)
+
+        # GS v 0 0 xL xH yL yH
+        $bw.Write([byte[]]@(0x1D, 0x76, 0x30, 0x00, $xL, $xH, $yL, $yH))
+
+        for ($y = 0; $y -lt $height; $y++) {
+            for ($bx = 0; $bx -lt $bytesPerRow; $bx++) {
+                $b = 0
+                for ($bit = 0; $bit -lt 8; $bit++) {
+                    $px = ($bx * 8) + $bit
+                    $c = $bmp.GetPixel($px, $y)
+                    if ($c.R -lt 160) {
+                        $b = $b -bor (0x80 -shr $bit)
+                    }
+                }
+                $bw.Write([byte]$b)
+            }
+        }
+
+        $bmp.Dispose()
+        return $ms.ToArray()
+    } catch {
+        $enc = [System.Text.Encoding]::GetEncoding("ISO-8859-1")
+        return $enc.GetBytes($text + "`n")
+    }
+}
+
 function New-EscPosReceipt {
     param([PSCustomObject]$data)
     
@@ -358,7 +428,7 @@ function New-EscPosReceipt {
     $bw.Write($enc.GetBytes("CASHIER: $($data.cashier)`n"))
     $bw.Write($enc.GetBytes("TERM: $($data.terminal_id)  $($data.date_time)`n"))
     $bw.Write($enc.GetBytes("--------------------------------`n"))
-    $bw.Write($enc.GetBytes("QTY  ITEM DESCRIPTION   PRICE    TOTAL`n"))
+    $bw.Write($enc.GetBytes("QTY  ITEM         PRICE    TOTAL`n"))
     $bw.Write($enc.GetBytes("--------------------------------`n"))
 
     # Items
@@ -390,18 +460,18 @@ function New-EscPosReceipt {
         return 0.0
     }
 
-    # Subtotals
-    $cur = if ($data.currency) { $data.currency } else { "P" }
-    $subtotal = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.subtotal))
+    # Subtotals (clean numbers without corrupt thermal currency blocks)
+    $cur = ""
+    $subtotal = [string]::Format("{0:N2}", (& $toNum $data.subtotal))
     $vatVal = & $toNum $data.vat
     $taxVal = & $toNum $data.tax
     $vatRate = & $toNum $data.vat_rate
     $taxRate = & $toNum $data.tax_rate
-    $vat = [string]::Format("{0}{1:N2}", $cur, $vatVal)
-    $tax = [string]::Format("{0}{1:N2}", $cur, $taxVal)
-    $total = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.total))
-    $cash = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.cash))
-    $change = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.change))
+    $vat = [string]::Format("{0:N2}", $vatVal)
+    $tax = [string]::Format("{0:N2}", $taxVal)
+    $total = [string]::Format("{0:N2}", (& $toNum $data.total))
+    $cash = [string]::Format("{0:N2}", (& $toNum $data.cash))
+    $change = [string]::Format("{0:N2}", (& $toNum $data.change))
     $itemCount = if ($data.item_count) { "$($data.item_count)" } else { "1" }
 
     $bw.Write($enc.GetBytes((Format-ReceiptLine "SUBTOTAL:" $subtotal)))
@@ -518,7 +588,7 @@ function New-EscPosShiftStart {
                 $unitVal = if ($values.ContainsKey($k)) { $values[$k] } else { 0.0 }
                 $sub = $qty * $unitVal
                 $left = "$lbl x $qty"
-                $right = [string]::Format("P{0:N2}", $sub)
+                $right = [string]::Format("{0:N2}", $sub)
                 $bw.Write($enc.GetBytes((Format-ReceiptLine $left $right)))
             }
         }
@@ -527,9 +597,9 @@ function New-EscPosShiftStart {
     $bw.Write($enc.GetBytes("--------------------------------`n"))
 
     # Total Float
-    $cur = if ($data.currency) { $data.currency } else { "P" }
+    $cur = ""
     $totVal = if ($data.total) { [double]$data.total } else { 0.0 }
-    $totStr = [string]::Format("{0}{1:N2}", $cur, $totVal)
+    $totStr = [string]::Format("{0:N2}", $totVal)
 
     $bw.Write([byte[]]@(0x1B, 0x45, 0x01)) # Bold on
     $bw.Write([byte[]]@(0x1D, 0x21, 0x01)) # Double height
@@ -595,7 +665,7 @@ function New-EscPosShiftSummary {
     $bw.Write($enc.GetBytes("LOGOUT:  $($data.logout_time)`n"))
     $bw.Write($enc.GetBytes("--------------------------------`n"))
 
-    $cur = "P"
+    $cur = ""
     $toNum = {
         param($v)
         if ($null -eq $v -or "$v".Trim() -eq "") { return 0.0 }
@@ -605,21 +675,21 @@ function New-EscPosShiftSummary {
         return 0.0
     }
 
-    $openFloat = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.opening_float))
-    $cashSales = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.cash_sales))
-    $expected = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.expected_cash))
-    $actual = [string]::Format("{0}{1:N2}", $cur, (& $toNum $data.closing_cash))
+    $openFloat = [string]::Format("{0:N2}", (& $toNum $data.opening_float))
+    $cashSales = [string]::Format("{0:N2}", (& $toNum $data.cash_sales))
+    $expected = [string]::Format("{0:N2}", (& $toNum $data.expected_cash))
+    $actual = [string]::Format("{0:N2}", (& $toNum $data.closing_cash))
     $varVal = & $toNum $data.variance
     $varLabel = if ($varVal -lt 0) { "SHORT" } elseif ($varVal -gt 0) { "OVER" } else { "EXACT" }
     $varPrefix = if ($varVal -gt 0) { "+" } else { "" }
-    $varStr = [string]::Format("{0}{1}{2:N2} ({3})", $varPrefix, $cur, $varVal, $varLabel)
+    $varStr = [string]::Format("{0}{1:N2} ({2})", $varPrefix, $varVal, $varLabel)
 
     $bw.Write($enc.GetBytes((Format-ReceiptLine "OPENING FLOAT:" $openFloat)))
     $bw.Write($enc.GetBytes((Format-ReceiptLine "GROSS CASH SALES:" $cashSales)))
 
     $voidCount = if ($data.void_count) { [int]$data.void_count } else { 0 }
     if ($voidCount -gt 0) {
-        $voidValStr = [string]::Format("-{0}{1:N2}", $cur, (& $toNum $data.void_value))
+        $voidValStr = [string]::Format("-{0:N2}", (& $toNum $data.void_value))
         $bw.Write($enc.GetBytes((Format-ReceiptLine "VOIDS/REFUNDS ($voidCount):" $voidValStr)))
     }
 
@@ -650,7 +720,7 @@ function New-EscPosShiftSummary {
             if ($name.Length -gt 16) { $name = $name.Substring(0, 16) }
             $lineLeft = "$name x$($ti.qty)"
             $subVal = if ($ti.total) { $ti.total } else { $ti.revenue }
-            $lineRight = [string]::Format("P{0:N2}", (& $toNum $subVal))
+            $lineRight = [string]::Format("{0:N2}", (& $toNum $subVal))
             $bw.Write($enc.GetBytes((Format-ReceiptLine $lineLeft $lineRight)))
         }
     }
@@ -716,7 +786,7 @@ function New-EscPosVoidReceipt {
     $bw.Write($enc.GetBytes("DATE:    $($data.date_time)`n"))
     if ($data.reason) { $bw.Write($enc.GetBytes("REASON:  $($data.reason)`n")) }
     $bw.Write($enc.GetBytes("--------------------------------`n"))
-    $bw.Write($enc.GetBytes("QTY  ITEM DESCRIPTION   PRICE    TOTAL`n"))
+    $bw.Write($enc.GetBytes("QTY  ITEM         PRICE    TOTAL`n"))
     $bw.Write($enc.GetBytes("--------------------------------`n"))
 
     $toNum = {
@@ -737,32 +807,41 @@ function New-EscPosVoidReceipt {
 
             if ($remaining -gt 0) {
                 $name = if ($it.product_name) { $it.product_name } else { "Item" }
-                if ($name.Length -gt 14) { $name = $name.Substring(0, 14) }
+                if ($name.Length -gt 13) { $name = $name.Substring(0, 13) }
                 $tot = [string]::Format("{0:N2}", ($remaining * $price))
-                $line = "{0,-4} {1,-14} {2,6} {3,6}`n" -f "$remaining x", $name, $priceFmt, $tot
+                $line = "{0,-4} {1,-13} {2,6} {3,6}`n" -f "$remaining x", $name, $priceFmt, $tot
                 $bw.Write($enc.GetBytes($line))
             }
             if ($voidedQty -gt 0) {
                 $name = if ($it.product_name) { $it.product_name } else { "Item" }
-                if ($name.Length -gt 10) { $name = $name.Substring(0, 10) }
+                if ($name.Length -gt 9) { $name = $name.Substring(0, 9) }
                 $tot = [string]::Format("{0:N2}", ($voidedQty * $price))
-                $line = "{0,-4} {1,-10}VOID {2,6} {3,6}`n" -f "$voidedQty x", $name, $priceFmt, $tot
-                $bw.Write($enc.GetBytes($line))
+                $voidText = "{0,-3} {1,-9} VOID {2,6} {3,6}" -f "$voidedQty x", $name, $priceFmt, $tot
+                
+                # Cross out voided item row with strike lines and raster line through text
+                $bw.Write($enc.GetBytes("--------------------------------`n"))
+                $bw.Write($enc.GetBytes(">>> VOIDED (CROSSED OUT) <<<`n"))
+                $rasterLine = New-EscPosStrikethroughRow $voidText
+                $bw.Write([byte[]]@($rasterLine))
+                $bw.Write($enc.GetBytes("--------------------------------`n"))
             }
         }
     }
 
-    $bw.Write($enc.GetBytes("--------------------------------`n"))
+    $hasVoided = ($data.items | Where-Object { (& $toNum $_.voided_qty) -gt 0 }).Count -gt 0
+    if (-not $hasVoided) {
+        $bw.Write($enc.GetBytes("--------------------------------`n"))
+    }
 
-    $cur = if ($data.currency) { $data.currency } else { "P" }
+    $cur = ""
     $voidedAmt = & $toNum $data.voided_amount
     $netTotal  = & $toNum $data.net_total
 
     $bw.Write([byte[]]@(0x1B, 0x45, 0x01)) # Bold
-    $bw.Write($enc.GetBytes((Format-ReceiptLine "VOIDED / REFUNDED:" ([string]::Format("-{0}{1:N2}", $cur, $voidedAmt)))))
+    $bw.Write($enc.GetBytes((Format-ReceiptLine "VOIDED / REFUNDED:" ([string]::Format("-{0:N2}", $voidedAmt)))))
     $bw.Write([byte[]]@(0x1D, 0x21, 0x01)) # Double height
     $label = if ($isFullVoid) { "NEW TOTAL:" } else { "UPDATED TOTAL:" }
-    $bw.Write($enc.GetBytes((Format-ReceiptLine $label ([string]::Format("{0}{1:N2}", $cur, $netTotal)) 32)))
+    $bw.Write($enc.GetBytes((Format-ReceiptLine $label ([string]::Format("{0:N2}", $netTotal)) 32)))
     $bw.Write([byte[]]@(0x1D, 0x21, 0x00))
     $bw.Write([byte[]]@(0x1B, 0x45, 0x00))
     $bw.Write($enc.GetBytes("--------------------------------`n"))
@@ -832,14 +911,11 @@ while ($listener.IsListening) {
 
         # Enable complete CORS & Private Network Access for POS app (works for localhost and cloud https://pos-system-9f0n.onrender.com)
         $origin = $req.Headers["Origin"]
-        if ($origin) {
-            $res.AddHeader("Access-Control-Allow-Origin", $origin)
-            $res.AddHeader("Access-Control-Allow-Credentials", "true")
-        } else {
-            $res.AddHeader("Access-Control-Allow-Origin", "*")
-        }
+        if (-not $origin) { $origin = "*" }
+        $res.AddHeader("Access-Control-Allow-Origin", $origin)
         $res.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        $res.AddHeader("Access-Control-Allow-Headers", "Content-Type, X-Requested-With, Origin, Accept, Access-Control-Request-Private-Network")
+        $res.AddHeader("Access-Control-Allow-Headers", "Content-Type, X-Requested-With, Origin, Accept")
+        $res.AddHeader("Access-Control-Allow-Credentials", "true")
         $res.AddHeader("Access-Control-Allow-Private-Network", "true")
 
         if ($req.HttpMethod -eq "OPTIONS") {
@@ -901,13 +977,13 @@ while ($listener.IsListening) {
         }
 
         if ($req.HttpMethod -eq "POST" -and $req.Url.AbsolutePath -eq "/print") {
-            $reader = New-Object System.IO.StreamReader($req.InputStream, $req.ContentEncoding)
+            $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
             $body = $reader.ReadToEnd()
             $reader.Close()
 
             $data = ConvertFrom-Json $body
-            # Peso sign is not in the printer code page -> print as "P"
-            if ($data.currency -and "$($data.currency)" -eq [string][char]0x20B1) { $data.currency = 'P' }
+            # Remove currency symbol for thermal receipts so no CP437 corrupt block characters appear
+            $data.currency = ""
 
             $printType = if ($data.type) { "$($data.type)" } else { "sale" }
             $jobRef = if ($data.ref) { "$($data.ref)" } elseif ($data.order_ref) { "$($data.order_ref)" } else { '' }
